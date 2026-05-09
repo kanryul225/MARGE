@@ -3,8 +3,10 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+import queue as _queue
 import re
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ load_dotenv(ROOT / ".env")
 from apps.orchestrator.agent import build_bundle, orchestrator_agent
 from packages.llm_provider.client import build_chat_model_for_role
 from packages.llm_provider.settings import Role, RoleConfig
-from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, seed_demo_db
+from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, init_empty_db
 
 
 # ---------------------------------------------------------------------------
@@ -32,15 +34,15 @@ from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, seed
 # ---------------------------------------------------------------------------
 
 def _get_or_create_session_db() -> Path:
-    """Return the session-scoped SQLite path, seeding demo data if needed."""
+    """Return the session-scoped SQLite path, creating an empty DB if needed."""
     if "session_id" not in st.session_state:
         st.session_state["session_id"] = uuid.uuid4().hex[:8]
 
     db_path = SESSIONS_DIR / f"{st.session_state['session_id']}.db"
     if not db_path.exists():
-        seed_demo_db(db_path)
-        st.session_state["patients"] = ["seed-001"]
-        st.session_state["current_patient"] = "seed-001"
+        init_empty_db(db_path)
+        st.session_state["patients"] = []
+        st.session_state["current_patient"] = None
     return db_path
 
 
@@ -212,29 +214,67 @@ def _role_label(role: Role) -> str:
     return f"{cfg.primary.provider.value}:{cfg.primary.model_id}"
 
 
-async def _run_analysis(
+def stream_analysis(
     user_message: str,
-    patient_handle: str,
+    patient_handle: str | None,
     db_path: Path,
-) -> tuple[str, list[str]]:
-    prompt = (
-        f"Current patient handle: `{patient_handle}`. "
-        "If the user's message contains new clinical values (glucose, BMI, blood pressure, "
-        "age, insulin, pregnancy count, family history score, etc.), call `update_patient` "
-        "to persist them before running the ML tools. "
-        f"User message: {user_message}"
-    )
-    llm = build_chat_model_for_role(Role.ORCHESTRATOR)
-    bundle = build_bundle()
-    async with orchestrator_agent(bundle=bundle, llm=llm, patient_db_path=db_path) as agent:
-        result = await agent.run(prompt)
-    return _result_text(result), list(bundle.enforcer.trajectory)
+    state: dict,
+) -> Any:
+    """Return a generator that streams tool-call lines then the final response.
 
+    Populates `state` with 'response', 'trajectory', and 'error' when done.
+    Designed for use with st.write_stream().
+    """
+    eq: _queue.Queue = _queue.Queue()
 
-def run_analysis(
-    user_message: str, patient_handle: str, db_path: Path
-) -> tuple[str, list[str]]:
-    return asyncio.run(_run_analysis(user_message, patient_handle, db_path))
+    async def _run() -> None:
+        if patient_handle:
+            prompt = (
+                f"Current patient handle: `{patient_handle}`. "
+                "If the user's message contains new clinical values (glucose, BMI, blood pressure, "
+                "age, insulin, pregnancy count, family history score, etc.), call `update_patient` "
+                "to persist them before running the ML tools. "
+                f"User message: {user_message}"
+            )
+            patient_db_path: Path | None = db_path
+        else:
+            prompt = user_message
+            patient_db_path = None
+
+        llm = build_chat_model_for_role(Role.ORCHESTRATOR)
+        bundle = build_bundle()
+
+        # Intercept enforcer.record so every tool call streams to the queue
+        _orig_record = bundle.enforcer.record
+        def _streaming_record(tool_name: str) -> None:
+            _orig_record(tool_name)
+            eq.put(("tool", tool_name))
+        bundle.enforcer.record = _streaming_record
+
+        try:
+            async with orchestrator_agent(bundle=bundle, llm=llm, patient_db_path=patient_db_path) as agent:
+                result = await agent.run(prompt)
+            state["response"] = _result_text(result)
+            state["trajectory"] = list(bundle.enforcer.trajectory)
+        except Exception as exc:
+            state["error"] = f"{type(exc).__name__}: {exc}"
+            state["response"] = f"Run failed: `{state['error']}`"
+            state["trajectory"] = list(bundle.enforcer.trajectory)
+        finally:
+            eq.put(None)
+
+    threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
+
+    def _generator():
+        while True:
+            item = eq.get(timeout=180)
+            if item is None:
+                break
+            _, tool_name = item
+            yield f"🔧 `{tool_name}`\n\n"
+        yield state.get("response", "")
+
+    return _generator()
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +307,14 @@ def _app_main() -> None:
                 st.session_state.pop("messages", None)
                 st.success(f"Loaded {len(handles)} patient(s).")
 
-        patients: list[str] = st.session_state.get("patients", ["seed-001"])
-        if len(patients) > 1:
+        patients: list[str] = st.session_state.get("patients", [])
+        if not patients:
+            st.caption("No patients loaded. Upload a CSV to start.")
+            st.session_state["current_patient"] = None
+        elif len(patients) == 1:
+            st.caption(f"Patient: `{patients[0]}`")
+            st.session_state["current_patient"] = patients[0]
+        else:
             current = st.selectbox(
                 "Active patient",
                 patients,
@@ -277,9 +323,6 @@ def _app_main() -> None:
             if current != st.session_state.get("current_patient"):
                 st.session_state["current_patient"] = current
                 st.session_state.pop("messages", None)
-        else:
-            st.caption(f"Patient: `{patients[0]}`")
-            st.session_state["current_patient"] = patients[0]
 
         st.markdown("---")
         if st.button("Clear conversation", use_container_width=True):
@@ -293,24 +336,24 @@ def _app_main() -> None:
                 st.json(st.session_state.get("messages", []))
 
     # --- Chat ---
+    current_patient = st.session_state.get("current_patient")
+    no_patients = not current_patient
+
     if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": (
-                    "Tell me about the patient, or share any clinical values you have "
-                    "(age, blood sugar, BMI, blood pressure, etc.) and I'll run the analysis."
-                ),
-                "trajectory": [],
-            }
-        ]
+        welcome = (
+            "Upload a patient CSV from the sidebar to get started."
+            if no_patients else
+            "Tell me about the patient, or share any clinical values you have "
+            "(age, blood sugar, BMI, blood pressure, etc.) and I'll run the analysis."
+        )
+        st.session_state.messages = [{"role": "assistant", "content": welcome, "trajectory": []}]
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            if message.get("report"):
-                render_report(message["content"])
-            else:
-                st.markdown(message["content"])
+            traj = message.get("trajectory") or []
+            for tool in traj:
+                st.markdown(f"🔧 `{tool}`")
+            st.markdown(message["content"])
 
     user_input = st.chat_input("Message")
     if user_input:
@@ -318,20 +361,13 @@ def _app_main() -> None:
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        current_patient = st.session_state.get("current_patient", "seed-001")
-
         with st.chat_message("assistant"):
-            with st.status("Running", expanded=False):
-                error_msg: str | None = None
-                try:
-                    response, trajectory = run_analysis(user_input, current_patient, db_path)
-                except Exception as exc:
-                    error_msg = f"{type(exc).__name__}: {exc}"
-                    response = f"Run failed: `{error_msg}`"
-                    trajectory = []
-                    st.error(response)
-                else:
-                    render_report(response)
+            stream_state: dict = {"response": "", "trajectory": [], "error": None}
+            st.write_stream(stream_analysis(user_input, current_patient, db_path, stream_state))
+
+        response = stream_state["response"]
+        trajectory = stream_state["trajectory"]
+        error_msg = stream_state["error"]
 
         _append_chat_log(
             session_id=st.session_state.get("session_id", "unknown"),
@@ -343,7 +379,7 @@ def _app_main() -> None:
         )
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": response, "trajectory": trajectory, "report": True}
+            {"role": "assistant", "content": response, "trajectory": trajectory}
         )
 
 

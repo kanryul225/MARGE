@@ -133,6 +133,9 @@ async def orchestrator_agent(
             patient_server = build_patient_server(patient_db_path)
             async with Client(patient_server) as patient_client:
                 patient_tools = await MCPTool.from_client(patient_client.session)
+                for tool in patient_tools:
+                    tool.emitter.match("*", _make_recorder(tool.name))
+
                 yield RequirementAgent(
                     **common_kwargs,
                     tools=[*local_tools, *ml_tools, *patient_tools],

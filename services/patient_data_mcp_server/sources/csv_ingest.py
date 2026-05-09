@@ -76,6 +76,12 @@ def ingest_csv(csv_source: Path | str | bytes, db_path: Path) -> list[str]:
     return handles
 
 
+def init_empty_db(db_path: Path) -> None:
+    """Create a session SQLite DB with the schema but no patients."""
+    conn = _open(db_path)
+    conn.close()
+
+
 def seed_demo_db(db_path: Path) -> None:
     """Create a demo SQLite DB with seed-001 (breast-cancer + diabetes features)."""
     bc = load_breast_cancer()
