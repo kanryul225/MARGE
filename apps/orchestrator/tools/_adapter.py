@@ -23,8 +23,11 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from apps.orchestrator.tools import (
+    abstain as _ab,
+    clinical_report as _cr,
     consult_expert as _ce,
-    final_report as _fr,
+    request_more_info as _rmi,
+    update_user as _uu,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +39,7 @@ if TYPE_CHECKING:
 # Order is the order the LLM will see them in tool listings.
 # Patient tools (list_patients, get_patient, update_patient) come from the
 # patient-data MCP server and are not listed here.
-LOCAL_TOOL_MODULES: tuple[ModuleType, ...] = (_ce, _fr)
+LOCAL_TOOL_MODULES: tuple[ModuleType, ...] = (_uu, _ce, _rmi, _cr, _ab)
 
 
 def _to_tool_output(result: Any) -> Any:

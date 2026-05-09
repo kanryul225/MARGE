@@ -1,73 +1,85 @@
-"""Integration: code-side protocol flow without LLM.
+"""Integration: protocol-flow walkthrough (no LLM, no agent loop).
 
-Simulates the orchestrator's tool-call sequence and verifies the defensive
-backstop blocks final_report until ML and expert have appeared in the trajectory.
+Simulates the orchestrator's tool-call sequence (recording each step in
+the ProtocolEnforcer). Verifies that the trajectory ends up with the
+correct shape for each scenario.
+
+The actual gate enforcement is now LLM-side via `MARGEProtocolRequirement`;
+the enforcer's role here is trajectory recording for logs/UI.
 """
 
 import pytest
 
-from apps.orchestrator.middleware.enforce_protocol import (
-    ProtocolEnforcer,
-    ProtocolViolation,
-)
+from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
+from apps.orchestrator.tools.abstain import make_abstain
+from apps.orchestrator.tools.clinical_report import make_clinical_report
 from apps.orchestrator.tools.consult_expert import make_consult_expert
-from apps.orchestrator.tools.final_report import make_final_report
+from apps.orchestrator.tools.request_more_info import make_request_more_info
+from apps.orchestrator.tools.update_user import make_update_user
 from services.medical_expert_agent.agent import StubMedicalExpert
-from services.patient_data_mcp_server.sources.csv_ingest import seed_demo_db
-from services.patient_data_mcp_server.sources.sqlite_db import SqlitePatientSource
 
 
-@pytest.fixture()
-def deps(tmp_path):
-    db = tmp_path / "test.db"
-    seed_demo_db(db)
+@pytest.fixture
+def deps():
     enforcer = ProtocolEnforcer()
     return {
         "enforcer": enforcer,
+        "update": make_update_user(enforcer),
         "consult": make_consult_expert(StubMedicalExpert(), enforcer),
-        "final": make_final_report(enforcer),
+        "request": make_request_more_info(enforcer),
+        "report": make_clinical_report(enforcer),
+        "abstain": make_abstain(enforcer),
     }
 
 
-def test_happy_path_ml_before_expert(deps):
-    deps["enforcer"].record("predict_breast_cancer_malignancy")
-    deps["consult"](
-        question="What does this prediction suggest?",
-        findings={"prediction": "malignant", "confidence": 0.989},
+def test_happy_path_expert_then_ml_then_report(deps):
+    deps["update"](text="Hi! Let me check…")
+    deps["consult"](question="Differential for given symptoms?", findings={"sx": "polydipsia"})
+    deps["enforcer"].record("predict_diabetes_risk")  # ML simulated
+    deps["consult"](question="ML score interpretation?", findings={"score": 0.85})
+    deps["report"](
+        summary="High diabetes risk.",
+        recommendation="Refer to PCP.",
+        confidence="high",
     )
-    result = deps["final"](response="High-confidence finding — refer for biopsy.")
-    assert result == {"response": "High-confidence finding — refer for biopsy."}
-
-
-def test_happy_path_expert_before_ml(deps):
-    """Expert can be consulted first — order is free."""
-    deps["consult"](question="Which model should we run?", findings={})
-    deps["enforcer"].record("predict_diabetes_risk")
-    result = deps["final"](response="Risk profile suggests follow-up labs.")
-    assert "response" in result
-
-
-@pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
-def test_blocked_when_skipping_ml(deps):
-    deps["consult"](question="?", findings={})
-    with pytest.raises(ProtocolViolation, match="ML model"):
-        deps["final"](response="anything")
-
-
-@pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
-def test_blocked_when_skipping_expert(deps):
-    deps["enforcer"].record("predict_diabetes_risk")
-    with pytest.raises(ProtocolViolation, match="expert"):
-        deps["final"](response="anything")
-
-
-def test_trajectory_records_full_sequence(deps):
-    deps["enforcer"].record("predict_breast_cancer_malignancy")
-    deps["consult"](question="?", findings={})
-    deps["final"](response="ok")
 
     assert deps["enforcer"].trajectory == (
-        "predict_breast_cancer_malignancy",
+        "update_user",
         "consult_medical_expert",
-        "final_report",
+        "predict_diabetes_risk",
+        "consult_medical_expert",
+        "clinical_report",
     )
+
+
+def test_scope_mismatch_path_ends_in_abstain(deps):
+    deps["consult"](question="Differential for headache + fatigue", findings={})
+    deps["update"](text="No good ML scope here.")
+    deps["abstain"](reason="No relevant ML predictor for these symptoms.")
+
+    traj = deps["enforcer"].trajectory
+    assert "abstain" in traj
+    assert "consult_medical_expert" in traj
+
+
+def test_request_more_info_path_terminates_without_ml(deps):
+    deps["update"](text="Got it. Let me ask for some specifics.")
+    deps["request"](
+        needed=[{"name": "HbA1c", "why": "confirm diabetes range"}],
+        rationale="HbA1c materially shifts diabetes risk.",
+    )
+
+    traj = deps["enforcer"].trajectory
+    assert traj == ("update_user", "request_more_info")
+
+
+def test_multiple_update_user_calls_within_one_turn(deps):
+    deps["update"](text="One.")
+    deps["update"](text="Two.")
+    deps["consult"](question="?", findings={})
+    deps["update"](text="Three.")
+    deps["request"](needed=[], rationale="x")
+
+    traj = deps["enforcer"].trajectory
+    assert traj.count("update_user") == 3
+    assert traj[-1] == "request_more_info"

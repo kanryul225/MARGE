@@ -5,15 +5,22 @@ Two layers:
 `build_bundle()` returns deterministic dependencies (enforcer, local tools,
 system prompt). No LLM or DB dependency — tests reach for this directly.
 
-`orchestrator_agent(bundle, llm, patient_db_path)` is an async context manager:
+`orchestrator_agent(bundle, llm, patient_db_path, memory)` is an async
+context manager:
 - Opens in-process MCP clients for both the ML-models server and the
   patient-data server (backed by the session SQLite DB).
 - Discovers tools from both MCP sessions.
+- Wires the MARGE protocol Requirement (final_answer gating + ordering).
 - Yields a fully wired `RequirementAgent`.
 - Closes both MCP sessions on exit.
 
+Memory: the caller may pass a `BaseMemory` instance to persist conversation
+history across user turns (Streamlit reuses one per session). Defaults to
+fresh `UnconstrainedMemory` when omitted.
+
 Usage:
-    async with orchestrator_agent(bundle, llm, patient_db_path=db) as agent:
+    async with orchestrator_agent(bundle, llm, patient_db_path=db,
+                                   memory=session_memory) as agent:
         result = await agent.run("Analyse patient csv-42.")
 """
 
@@ -23,14 +30,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
-from apps.orchestrator.requirements.marge_protocol import build_marge_protocol_requirement
+from apps.orchestrator.requirements.marge_protocol import (
+    build_marge_protocol_requirement,
+)
+from apps.orchestrator.tools.abstain import make_abstain
+from apps.orchestrator.tools.clinical_report import make_clinical_report
 from apps.orchestrator.tools.consult_expert import make_consult_expert
-from apps.orchestrator.tools.final_report import make_final_report
+from apps.orchestrator.tools.request_more_info import make_request_more_info
+from apps.orchestrator.tools.update_user import make_update_user
 from services.medical_expert_agent.agent import StubMedicalExpert
 
 if TYPE_CHECKING:
     from beeai_framework.agents.requirement import RequirementAgent
     from beeai_framework.backend.chat import ChatModel
+    from beeai_framework.memory.base_memory import BaseMemory
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
 
@@ -44,14 +57,24 @@ class OrchestratorBundle:
     local_tools: dict[str, object]
 
 
-def build_bundle() -> OrchestratorBundle:
-    """Build the orchestrator's deterministic dependencies."""
+def build_bundle(expert=None) -> OrchestratorBundle:
+    """Build the orchestrator's deterministic dependencies.
+
+    Args:
+        expert: Optional MedicalExpert implementation. Defaults to
+            `StubMedicalExpert` (deterministic test stub). Production
+            use should pass the live BeeAI sub-agent expert.
+    """
     enforcer = ProtocolEnforcer()
-    expert = StubMedicalExpert()
+    if expert is None:
+        expert = StubMedicalExpert()
 
     local_tools = {
+        "update_user": make_update_user(enforcer),
         "consult_medical_expert": make_consult_expert(expert, enforcer),
-        "final_report": make_final_report(enforcer),
+        "request_more_info": make_request_more_info(enforcer),
+        "clinical_report": make_clinical_report(enforcer),
+        "abstain": make_abstain(enforcer),
     }
 
     return OrchestratorBundle(
@@ -66,6 +89,7 @@ async def orchestrator_agent(
     bundle: OrchestratorBundle,
     llm: "ChatModel",
     patient_db_path: Path | None = None,
+    memory: "BaseMemory | None" = None,
 ) -> AsyncIterator["RequirementAgent"]:
     """Build and yield a fully wired RequirementAgent.
 
@@ -77,7 +101,9 @@ async def orchestrator_agent(
         bundle: Deterministic dependencies from `build_bundle()`.
         llm: Chat model instance.
         patient_db_path: Path to the session SQLite DB. If None, the patient
-            MCP server is not attached (ML-only mode; patient tools unavailable).
+            MCP server is not attached (ML-only mode).
+        memory: Optional `BaseMemory` to persist conversation across turns.
+            Defaults to a fresh `UnconstrainedMemory`.
     """
     from beeai_framework.agents.requirement import RequirementAgent
     from beeai_framework.memory import UnconstrainedMemory
@@ -90,6 +116,9 @@ async def orchestrator_agent(
 
     local_tools = local_tools_as_beeai(bundle)
     ml_server = build_server()
+
+    if memory is None:
+        memory = UnconstrainedMemory()
 
     def _make_recorder(tool_name: str):
         def _record(data, event) -> None:
@@ -111,9 +140,9 @@ async def orchestrator_agent(
 
                 agent = RequirementAgent(
                     llm=llm,
-                    memory=UnconstrainedMemory(),
+                    memory=memory,
                     tools=[*local_tools, *ml_tools, *patient_tools],
-                    requirements=[],  # MARGE protocol requirement temporarily disabled
+                    requirements=[build_marge_protocol_requirement()],
                     name="MARGE Orchestrator",
                     description=(
                         "Clinical ML head researcher: orchestrates ML tools, "
@@ -126,9 +155,9 @@ async def orchestrator_agent(
         else:
             agent = RequirementAgent(
                 llm=llm,
-                memory=UnconstrainedMemory(),
+                memory=memory,
                 tools=[*local_tools, *ml_tools],
-                requirements=[],  # MARGE protocol requirement temporarily disabled
+                requirements=[build_marge_protocol_requirement()],
                 name="MARGE Orchestrator",
                 description=(
                     "Clinical ML head researcher: orchestrates ML tools "

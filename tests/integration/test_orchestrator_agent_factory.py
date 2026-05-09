@@ -39,18 +39,24 @@ async def test_agent_has_local_tools_plus_ml_tools():
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
         tool_names = {t.name for t in agent._tools}
-    expected_local = {"consult_medical_expert", "final_report"}
+    expected_local = {
+        "update_user",
+        "consult_medical_expert",
+        "request_more_info",
+        "clinical_report",
+        "abstain",
+    }
     expected_ml = {"predict_breast_cancer_malignancy", "predict_diabetes_risk"}
     assert expected_local <= tool_names
     assert expected_ml <= tool_names
 
 
 @pytest.mark.asyncio
-async def test_agent_has_four_tools_without_patient_db():
+async def test_agent_has_seven_tools_without_patient_db():
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        # 2 local + 2 MCP-discovered ML = 4 (no patient_db_path)
-        assert len(agent._tools) == 4
+        # 5 local + 2 MCP-discovered ML = 7 (no patient_db_path)
+        assert len(agent._tools) == 7
 
 
 @pytest.mark.asyncio
@@ -65,17 +71,19 @@ async def test_agent_has_patient_tools_when_db_provided(tmp_path):
     assert {"list_patients", "get_patient", "update_patient"} <= tool_names
 
 
-@pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
 @pytest.mark.asyncio
 async def test_agent_has_marge_protocol_requirement():
+    """MARGEProtocolRequirement is now a single custom Requirement (not 3
+    ConditionalRequirements). It is async-init'd by BeeAI before run() —
+    we only assert it is wired in by class identity, not by `source`."""
     from apps.orchestrator.requirements.marge_protocol import (
-        build_marge_protocol_requirement,
+        MARGEProtocolRequirement,
     )
 
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        sources = [getattr(r, "source", None) for r in agent._requirements]
-        assert "final_report" in sources
+        types = [type(r).__name__ for r in agent._requirements]
+        assert "MARGEProtocolRequirement" in types
 
 
 @pytest.mark.asyncio
@@ -122,5 +130,8 @@ async def test_system_prompt_marker_present_in_bundle():
     `instructions` into its template is its own responsibility."""
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        assert "ML Head Researcher" in bundle.system_prompt
+        # The agent_fix system prompt opens with "MARGE Orchestrator" and
+        # explicitly names the dual role.
+        assert "MARGE Orchestrator" in bundle.system_prompt
+        assert "ML head researcher" in bundle.system_prompt
         assert agent.meta.name == "MARGE Orchestrator"

@@ -47,7 +47,10 @@ def _get_or_create_session_db() -> Path:
 
 
 def _reset_session() -> None:
-    for key in ("session_id", "patients", "current_patient", "messages", "csv_file_id"):
+    for key in (
+        "session_id", "patients", "current_patient", "messages",
+        "csv_file_id", "orch_memory",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -122,6 +125,117 @@ def _highlight_numbers(text: str) -> str:
         r"<span class='metric-inline'>\1</span>",
         escaped,
     )
+
+
+def render_clinical_report_card(payload: dict) -> None:
+    """Render a structured clinical_report payload (new schema).
+
+    payload shape: {summary, recommendation, confidence, evidence: [...],
+                    expert_quote, safety_note}
+    """
+    summary = payload.get("summary", "")
+    recommendation = payload.get("recommendation", "")
+    confidence = payload.get("confidence", "medium")
+    evidence = payload.get("evidence") or []
+    expert_quote = payload.get("expert_quote")
+    safety = payload.get("safety_note", "")
+
+    tone_color = {"low": "#facc15", "medium": "#facc15", "high": "#34d399"}.get(confidence, "#a7b0be")
+
+    st.markdown(f"""
+        <style>
+        .cr-card {{ border:1px solid rgba(148,163,184,.32); border-radius:10px;
+                    padding:1rem 1.1rem; margin:.4rem 0 .6rem;
+                    background:rgba(15,23,42,.45); }}
+        .cr-title {{ font-weight:750; font-size:1.05rem; margin-bottom:.4rem; }}
+        .cr-conf {{ display:inline-block; padding:.1rem .55rem; border-radius:999px;
+                    font-size:.75rem; font-weight:650; margin-left:.4rem;
+                    background:rgba(148,163,184,.18); color:{tone_color}; }}
+        .cr-section {{ margin-top:.6rem; }}
+        .cr-h {{ font-weight:650; color:#cbd5e1; font-size:.85rem; margin-bottom:.15rem; }}
+        .cr-quote {{ border-left:3px solid #94a3b8; padding-left:.7rem; color:#cbd5e1;
+                     font-style:italic; margin:.3rem 0; }}
+        .cr-evid {{ font-size:.86rem; padding:.45rem .6rem;
+                    border:1px solid rgba(148,163,184,.22); border-radius:6px;
+                    margin:.25rem 0; background:rgba(15,23,42,.32); }}
+        .cr-safety {{ font-size:.78rem; color:#a7b0be; margin-top:.7rem;
+                      padding-top:.5rem; border-top:1px dashed rgba(148,163,184,.25); }}
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"<div class='cr-card'>"
+                f"<div class='cr-title'>Clinical report"
+                f"<span class='cr-conf'>{confidence.upper()}</span></div>"
+                f"<div class='cr-section'><div class='cr-h'>Summary</div>{summary}</div>"
+                f"<div class='cr-section'><div class='cr-h'>Recommendation</div>{recommendation}</div>",
+                unsafe_allow_html=True)
+
+    if evidence:
+        evid_html = "".join(
+            f"<div class='cr-evid'><b>{e.get('model','?')}</b> → "
+            f"{e.get('predicted_class','?')} (conf {e.get('confidence',0):.2f})</div>"
+            for e in evidence
+        )
+        st.markdown(f"<div class='cr-section'><div class='cr-h'>ML evidence</div>{evid_html}</div>",
+                    unsafe_allow_html=True)
+
+    if expert_quote:
+        st.markdown(f"<div class='cr-section'><div class='cr-h'>Expert insight</div>"
+                    f"<div class='cr-quote'>{expert_quote}</div></div>", unsafe_allow_html=True)
+
+    if safety:
+        st.markdown(f"<div class='cr-safety'>{safety}</div></div>", unsafe_allow_html=True)
+    else:
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_abstain_card(payload: dict) -> None:
+    reason = payload.get("reason", "")
+    fallback = payload.get("fallback_recommendation", "")
+    st.warning(f"**Cannot reliably advise**\n\n{reason}\n\n**Suggested next step:** {fallback}")
+
+
+def render_request_more_info_card(payload: dict) -> None:
+    rationale = payload.get("rationale", "")
+    needed = payload.get("needed") or []
+    st.info(f"**Need more info**\n\n{rationale}")
+    if needed:
+        rows = "\n".join(
+            f"- **{n.get('name')}** ({n.get('field_type','text')}"
+            f"{', ' + n.get('unit') if n.get('unit') else ''}): {n.get('why','')}"
+            for n in needed
+        )
+        st.markdown(rows)
+
+
+def _terminal_payload_from_events(events: list[dict]) -> tuple[str | None, dict | None]:
+    """Find the last terminal tool call in this turn's events; return (name, input)."""
+    terminals = {"clinical_report", "abstain", "request_more_info"}
+    for e in reversed(events):
+        if e.get("kind") == "tool_call" and e.get("name") in terminals:
+            # The structured payload may live on either tool_call or tool_output.
+            inp = e.get("input")
+            if inp:
+                return e["name"], inp
+            # Fall back to the matching tool_output (which carries input)
+            for f in reversed(events):
+                if (f.get("kind") == "tool_output" and f.get("name") == e["name"]
+                        and f.get("input")):
+                    return e["name"], f["input"]
+            return e["name"], None
+    return None, None
+
+
+def render_terminal_card(events: list[dict]) -> None:
+    name, payload = _terminal_payload_from_events(events)
+    if not name or not payload:
+        return
+    if name == "clinical_report":
+        render_clinical_report_card(payload)
+    elif name == "abstain":
+        render_abstain_card(payload)
+    elif name == "request_more_info":
+        render_request_more_info_card(payload)
 
 
 def render_report(text: str) -> None:
@@ -243,6 +357,19 @@ def _extract_token_text(token_event_data: Any) -> str:
     return str(msg)
 
 
+def _get_or_create_orch_memory():
+    """Persist BeeAI conversation memory across user turns (Streamlit reruns).
+
+    The orchestrator's UnconstrainedMemory carries the user prompt, all tool
+    calls, and assistant messages. Reusing the same instance across turns is
+    what makes multi-turn data gathering ("now share HbA1c") feel natural.
+    """
+    if "orch_memory" not in st.session_state:
+        from beeai_framework.memory import UnconstrainedMemory
+        st.session_state["orch_memory"] = UnconstrainedMemory()
+    return st.session_state["orch_memory"]
+
+
 def stream_analysis(
     user_message: str,
     patient_handle: str | None,
@@ -303,8 +430,11 @@ def stream_analysis(
         except Exception:
             pass  # if emitter API differs, silently skip — tool streaming still works
 
+        memory = _get_or_create_orch_memory()
         try:
-            async with orchestrator_agent(bundle=bundle, llm=llm, patient_db_path=patient_db_path) as agent:
+            async with orchestrator_agent(
+                bundle=bundle, llm=llm, patient_db_path=patient_db_path, memory=memory,
+            ) as agent:
                 # Hook 3: per-tool start/success/error (input + output capture)
                 for tool in agent._tools:
                     def make_recorder(tool_name: str):
@@ -474,6 +604,8 @@ def _app_main() -> None:
             for tool in traj:
                 st.markdown(f"🔧 `{tool}`")
             st.markdown(message["content"])
+            if message.get("events"):
+                render_terminal_card(message["events"])
 
     user_input = st.chat_input("Message")
     if user_input:
@@ -484,6 +616,8 @@ def _app_main() -> None:
         with st.chat_message("assistant"):
             stream_state: dict = {"response": "", "trajectory": [], "error": None, "events": []}
             st.write_stream(stream_analysis(user_input, current_patient, db_path, stream_state))
+            # After the stream completes, render any structured terminal card
+            render_terminal_card(stream_state.get("events", []))
 
         response = stream_state["response"]
         trajectory = stream_state["trajectory"]
@@ -501,7 +635,8 @@ def _app_main() -> None:
         )
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": response, "trajectory": trajectory}
+            {"role": "assistant", "content": response, "trajectory": trajectory,
+             "events": turn_events}
         )
 
 

@@ -1,28 +1,39 @@
-"""BeeAI Requirement encoding architecture.md §2.
+"""MARGE Protocol Requirement (custom BeeAI Requirement).
 
-Single rule on the orchestrator's only terminal tool, `final_report`:
+Encodes architecture.md §2 plus the role-aware extensions agreed in the
+agent_fix slice. Single requirement, four rules:
 
-- It is `allowed` only after the trajectory contains at least one
-  predict_* tool call AND at least one consult_medical_expert call,
-  in any order.
-- The agent's stop is `prevent`-ed until `final_report` has been
-  called at least once.
+  A. predict_* tools are disallowed until consult_medical_expert was
+     called successfully at least once. The expert decides which conditions
+     to consider; the orchestrator translates that into specific ML calls.
+  B. clinical_report (terminal) needs at least one predict_* AND at least
+     one consult_medical_expert in the trajectory.
+  C. abstain (terminal) needs at least one consult_medical_expert. This
+     covers the "expert says nothing in our ML scope is suspected" path.
+  D. request_more_info (terminal) is always allowed — the orchestrator may
+     ask the user for additional data at any point.
+  E. The agent cannot terminate (prevent_stop=True on every terminal) until
+     at least one of {clinical_report, abstain, request_more_info} has been
+     called. The intermediate `update_user` tool is unrestricted and never
+     terminates the loop.
 
-The two `custom_checks` look at the entire successful step trajectory
-without any ordering constraint between predict_* and consult_*. Multiple
-calls in either direction are fine; abstention or follow-up questions
-are expressed in `final_report`'s natural-language `response` field
-rather than via separate tools.
+Order between predict_* and consult_medical_expert beyond rule A is
+intentionally unconstrained — the orchestrator can re-consult the expert
+after running ML, run more ML after expert validation, etc.
+
+Helper functions `has_any_ml_prediction` and `has_consulted_expert` are
+exposed for tests and for ad-hoc inspection of an agent state.
 """
 
 from typing import Any
 
-from beeai_framework.agents.requirement.requirements.conditional import (
-    ConditionalRequirement,
+from beeai_framework.agents.requirement.requirements.requirement import (
+    Requirement,
+    Rule,
 )
+from beeai_framework.runnable import runnable_entry
 
 
-_TERMINAL_TOOL_NAME = "final_report"
 _ML_PREDICTION_PREFIX = "predict_"
 _EXPERT_TOOL_NAME = "consult_medical_expert"
 
@@ -37,7 +48,10 @@ def _successful_tool_names(state: Any) -> list[str]:
 
 def has_any_ml_prediction(state: Any) -> bool:
     """True if any predict_* tool has succeeded in the trajectory."""
-    return any(name.startswith(_ML_PREDICTION_PREFIX) for name in _successful_tool_names(state))
+    return any(
+        name.startswith(_ML_PREDICTION_PREFIX)
+        for name in _successful_tool_names(state)
+    )
 
 
 def has_consulted_expert(state: Any) -> bool:
@@ -45,21 +59,96 @@ def has_consulted_expert(state: Any) -> bool:
     return _EXPERT_TOOL_NAME in _successful_tool_names(state)
 
 
-def build_marge_protocol_requirement() -> ConditionalRequirement:
-    """Construct the single Requirement that gates `final_report`.
+class MARGEProtocolRequirement(Requirement):
+    """Single Requirement encoding the four MARGE protocol rules (A–E above)."""
 
-    - `custom_checks` keeps `final_report` disallowed until both checks pass.
-    - `min_invocations=1` keeps `prevent_stop=True` until `final_report` has
-      been called at least once — so the agent cannot terminate without
-      producing a final report.
-    """
-    return ConditionalRequirement(
-        target=_TERMINAL_TOOL_NAME,
-        custom_checks=[has_any_ml_prediction, has_consulted_expert],
-        min_invocations=1,
-        only_success_invocations=True,
-        reason=(
-            "final_report requires at least one ML prediction (predict_*) and "
-            "one consult_medical_expert call to have appeared in the trajectory."
-        ),
-    )
+    TERMINALS = frozenset({"clinical_report", "abstain", "request_more_info"})
+
+    @property
+    def priority(self) -> int:
+        return 50
+
+    async def init(self, *, tools, ctx) -> None:
+        await super().init(tools=tools, ctx=ctx)
+        self._predict_tools = [
+            t for t in tools if t.name.startswith(_ML_PREDICTION_PREFIX)
+        ]
+        self._terminal_tools = [t for t in tools if t.name in self.TERMINALS]
+
+    @runnable_entry
+    async def run(self, state: Any) -> list[Rule]:
+        return self._compute_rules(state)
+
+    def _compute_rules(self, state: Any) -> list[Rule]:
+        """Pure-sync rule evaluation. Public for tests."""
+        called = _successful_tool_names(state)
+        has_expert = _EXPERT_TOOL_NAME in called
+        has_ml = any(n.startswith(_ML_PREDICTION_PREFIX) for n in called)
+        has_terminal = any(n in self.TERMINALS for n in called)
+
+        rules: list[Rule] = []
+
+        # Rule A: predict_* gated on expert
+        for tool in getattr(self, "_predict_tools", []):
+            rules.append(
+                Rule(
+                    target=tool.name,
+                    allowed=has_expert,
+                    prevent_stop=False,
+                    hidden=False,
+                    forced=False,
+                    reason=None
+                    if has_expert
+                    else (
+                        "Consult the medical expert first — they decide which "
+                        "clinical concerns warrant ML-based screening, then "
+                        "you map those to the available predict_* models."
+                    ),
+                )
+            )
+
+        # Rules B / C / D + E (terminals)
+        for tool in getattr(self, "_terminal_tools", []):
+            if tool.name == "clinical_report":
+                allowed = has_ml and has_expert
+                reason = (
+                    None
+                    if allowed
+                    else (
+                        "clinical_report needs at least one predict_* run AND "
+                        "one consult_medical_expert in the trajectory."
+                    )
+                )
+            elif tool.name == "abstain":
+                allowed = has_expert
+                reason = (
+                    None
+                    if allowed
+                    else (
+                        "abstain may only be used after consulting the medical "
+                        "expert at least once."
+                    )
+                )
+            else:  # request_more_info — free
+                allowed = True
+                reason = None
+
+            rules.append(
+                Rule(
+                    target=tool.name,
+                    allowed=allowed,
+                    # Rule E: every terminal blocks stop until *any* terminal
+                    # has been called once.
+                    prevent_stop=not has_terminal,
+                    hidden=False,
+                    forced=False,
+                    reason=reason,
+                )
+            )
+
+        return rules
+
+
+def build_marge_protocol_requirement() -> MARGEProtocolRequirement:
+    """Factory used by `apps/orchestrator/agent.py`."""
+    return MARGEProtocolRequirement()

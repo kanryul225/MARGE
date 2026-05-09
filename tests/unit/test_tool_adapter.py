@@ -1,8 +1,9 @@
 """Tests for the BeeAI tool adapter.
 
 The adapter wraps Python callables as BeeAI Tools.
-`local_tools_as_beeai(bundle)` returns the two orchestrator-local tools
-(consult_medical_expert, final_report) as BeeAI Tools with the enforcer wired in.
+`local_tools_as_beeai(bundle)` returns the five orchestrator-local tools
+(update_user, consult_medical_expert, request_more_info, clinical_report,
+abstain) as BeeAI Tools with the enforcer wired in.
 """
 
 import asyncio
@@ -37,13 +38,21 @@ class TestToBeeaiTool:
 
 
 class TestLocalToolsAsBeeai:
-    def test_returns_two_tools(self):
+    EXPECTED = {
+        "update_user",
+        "consult_medical_expert",
+        "request_more_info",
+        "clinical_report",
+        "abstain",
+    }
+
+    def test_returns_five_tools(self):
         bundle = build_bundle()
         tools = local_tools_as_beeai(bundle)
-        assert len(tools) == 2
+        assert len(tools) == 5
 
     def test_tool_names_match_expected_set(self):
         bundle = build_bundle()
         tools = local_tools_as_beeai(bundle)
         names = {t.name for t in tools}
-        assert names == {"consult_medical_expert", "final_report"}
+        assert names == self.EXPECTED
