@@ -65,6 +65,7 @@ class TestPatientHistoryTool:
 class TestFinalReportTool:
     def test_blocks_when_no_ml_called(self):
         enforcer = ProtocolEnforcer()
+        enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)
         with pytest.raises(ProtocolViolation, match="ML model"):
             final(response="anything")
@@ -76,8 +77,9 @@ class TestFinalReportTool:
         with pytest.raises(ProtocolViolation, match="expert"):
             final(response="anything")
 
-    def test_succeeds_when_both_called(self):
+    def test_succeeds_when_workflow_sequence_called(self):
         enforcer = ProtocolEnforcer()
+        enforcer.record("consult_medical_expert")
         enforcer.record("predict_breast_cancer_malignancy")
         enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)
@@ -86,6 +88,7 @@ class TestFinalReportTool:
 
     def test_records_final_report_call(self):
         enforcer = ProtocolEnforcer()
+        enforcer.record("consult_medical_expert")
         enforcer.record("predict_diabetes_risk")
         enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)

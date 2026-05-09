@@ -109,5 +109,5 @@ async def test_system_prompt_marker_present_in_bundle():
     `instructions` into its template is its own responsibility."""
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        assert "ML Head Researcher" in bundle.system_prompt
+        assert "ML Orchestrator" in bundle.system_prompt
         assert agent.meta.name == "MARGE Orchestrator"

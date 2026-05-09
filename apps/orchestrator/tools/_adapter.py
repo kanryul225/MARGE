@@ -16,6 +16,7 @@ so we just wrap the return value as `JSONToolOutput`.
 """
 
 import functools
+import inspect
 from collections.abc import Callable
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -63,8 +64,11 @@ def to_beeai_tool(
     from beeai_framework.tools import tool
 
     @functools.wraps(fn)
-    def output_wrapped(*args: Any, **kwargs: Any) -> Any:
-        return _to_tool_output(fn(*args, **kwargs))
+    async def output_wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = fn(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return _to_tool_output(result)
 
     decorator = tool(name=name, description=description, input_schema=input_schema)
     return decorator(output_wrapped)

@@ -1,20 +1,19 @@
-"""BeeAI Requirement encoding architecture.md §2.
+"""BeeAI Requirements encoding the MARGE workflow.
 
-Single rule on the orchestrator's only terminal tool, `final_report`:
+The workflow is:
 
-- It is `allowed` only after the trajectory contains at least one
-  predict_* tool call AND at least one consult_medical_expert call,
-  in any order.
-- The agent's stop is `prevent`-ed until `final_report` has been
-  called at least once.
+    consult_medical_expert -> predict_* -> consult_medical_expert -> final_report
 
-The two `custom_checks` look at the entire successful step trajectory
-without any ordering constraint between predict_* and consult_*. Multiple
-calls in either direction are fine; abstention or follow-up questions
-are expressed in `final_report`'s natural-language `response` field
-rather than via separate tools.
+Two structural layers enforce this:
+
+- Each discovered `predict_*` tool is disallowed until at least one expert
+  pre-consult has succeeded.
+- `final_report` is disallowed until the successful trajectory contains an
+  expert pre-consult, at least one ML prediction after that consult, and an
+  expert post-consult after the ML result.
 """
 
+from collections.abc import Iterable
 from typing import Any
 
 from beeai_framework.agents.requirement.requirements.conditional import (
@@ -45,21 +44,86 @@ def has_consulted_expert(state: Any) -> bool:
     return _EXPERT_TOOL_NAME in _successful_tool_names(state)
 
 
-def build_marge_protocol_requirement() -> ConditionalRequirement:
-    """Construct the single Requirement that gates `final_report`.
+def has_pre_ml_expert_consult(state: Any) -> bool:
+    """True if an expert consult succeeded before a successful ML prediction."""
+    seen_expert = False
+    for name in _successful_tool_names(state):
+        if name == _EXPERT_TOOL_NAME:
+            seen_expert = True
+        elif name.startswith(_ML_PREDICTION_PREFIX) and seen_expert:
+            return True
+    return False
 
-    - `custom_checks` keeps `final_report` disallowed until both checks pass.
+
+def has_post_ml_expert_consult(state: Any) -> bool:
+    """True if an expert consult succeeded after a successful ML prediction."""
+    seen_ml = False
+    for name in _successful_tool_names(state):
+        if name.startswith(_ML_PREDICTION_PREFIX):
+            seen_ml = True
+        elif name == _EXPERT_TOOL_NAME and seen_ml:
+            return True
+    return False
+
+
+def has_expert_ml_expert_sequence(state: Any) -> bool:
+    """True if the successful trajectory contains expert -> ML -> expert."""
+    seen_pre_expert = False
+    seen_ml_after_pre_expert = False
+
+    for name in _successful_tool_names(state):
+        if name == _EXPERT_TOOL_NAME:
+            if seen_ml_after_pre_expert:
+                return True
+            seen_pre_expert = True
+        elif name.startswith(_ML_PREDICTION_PREFIX) and seen_pre_expert:
+            seen_ml_after_pre_expert = True
+
+    return False
+
+
+def _build_ml_preconsult_requirement(tool_name: str) -> ConditionalRequirement:
+    return ConditionalRequirement(
+        target=tool_name,
+        custom_checks=[has_consulted_expert],
+        only_success_invocations=True,
+        reason=(
+            f"{tool_name} requires a successful consult_medical_expert pre-consult "
+            "before any ML prediction tool can run."
+        ),
+    )
+
+
+def build_marge_protocol_requirement() -> ConditionalRequirement:
+    """Construct the terminal Requirement that gates `final_report`.
+
+    - `custom_checks` keeps `final_report` disallowed until the successful
+      trajectory contains expert -> ML -> expert.
     - `min_invocations=1` keeps `prevent_stop=True` until `final_report` has
-      been called at least once — so the agent cannot terminate without
+      been called at least once, so the agent cannot terminate without
       producing a final report.
     """
     return ConditionalRequirement(
         target=_TERMINAL_TOOL_NAME,
-        custom_checks=[has_any_ml_prediction, has_consulted_expert],
+        custom_checks=[has_expert_ml_expert_sequence],
         min_invocations=1,
         only_success_invocations=True,
         reason=(
-            "final_report requires at least one ML prediction (predict_*) and "
-            "one consult_medical_expert call to have appeared in the trajectory."
+            "final_report requires a successful workflow sequence: "
+            "consult_medical_expert -> predict_* -> consult_medical_expert."
         ),
     )
+
+
+def build_marge_protocol_requirements(
+    ml_tool_names: Iterable[str] = (),
+) -> list[ConditionalRequirement]:
+    """Build all structural requirements for the current tool surface."""
+    return [
+        *[
+            _build_ml_preconsult_requirement(name)
+            for name in ml_tool_names
+            if name.startswith(_ML_PREDICTION_PREFIX)
+        ],
+        build_marge_protocol_requirement(),
+    ]

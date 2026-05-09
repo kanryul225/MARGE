@@ -35,6 +35,6 @@ class TestBuildBundle:
 
     def test_system_prompt_loaded(self):
         bundle = build_bundle()
-        assert "ML Head Researcher" in bundle.system_prompt
+        assert "ML Orchestrator" in bundle.system_prompt
         assert "consult_medical_expert" in bundle.system_prompt
         assert "final_report" in bundle.system_prompt

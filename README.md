@@ -9,7 +9,7 @@ See [`overview.md`](./overview.md) for the concept and [`architecture.md`](./arc
 - **ML stack** (XGBoost + CatBoost over MCP): two models registered, drop-in pattern verified.
 - **BeeAI orchestrator**: assembled (`RequirementAgent`, 5 local tools + 2 MCP-discovered ML tools), protocol middleware enforced; live LLM tested against NVIDIA NIM (Qwen3.5-397B).
 - **LLM provider abstraction** (`packages/llm_provider/`): five providers (Anthropic, watsonx, Cerebras, NVIDIA NIM, Chutes) + per-role routing (orchestrator vs medical expert) + opt-in `FallbackChatModel`.
-- **Medical expert sub-agent**: stub returning a fixed `MedicalExpertResponse` — real BeeAI sub-agent + RAG / web search wiring is the next slice.
+- **Medical expert sub-agent**: LLM-backed `MedicalExpertAgent` wired via `MEDICAL_EXPERT_*`; RAG / web search citations are the next slice.
 - **Streamlit UI**: not started.
 
 ## Setup

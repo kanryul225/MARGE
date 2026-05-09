@@ -40,6 +40,17 @@ class TestToBeeaiTool:
         )
         assert isinstance(bt, Tool)
 
+    def test_supports_async_callables(self):
+        async def fn(x: int) -> dict:
+            return {"x": x}
+
+        bt = to_beeai_tool(
+            fn, name="sample_async", description="d", input_schema=_SampleInput
+        )
+        result = asyncio.get_event_loop().run_until_complete(bt.run({"x": 7}))
+
+        assert result.result == {"x": 7}
+
 
 class TestLocalToolsAsBeeai:
     def test_returns_three_tools(self):

@@ -1,11 +1,9 @@
-"""Integration: code-side protocol flow without LLM (single-terminal version).
+"""Integration: code-side protocol flow without LLM.
 
-Simulates the orchestrator's tool-call sequence (recording each step in
-the ProtocolEnforcer) and verifies the defensive backstop blocks
-`final_report` until ML and expert have appeared in the trajectory.
+Simulates the orchestrator's tool-call sequence and verifies the defensive
+backstop blocks `final_report` until the trajectory contains:
 
-Order between predict_* and consult_medical_expert is intentionally
-unconstrained — both orderings pass.
+    consult_medical_expert -> predict_* -> consult_medical_expert
 """
 
 import pytest
@@ -32,24 +30,35 @@ def deps():
     }
 
 
-def test_happy_path_ml_before_expert(deps):
+def test_happy_path_expert_ml_expert(deps):
     deps["history"](handle="seed-001")
+    deps["consult"](
+        question="What clinical concerns should we consider before ML?",
+        findings={"patient": "seed-001"},
+    )
     deps["enforcer"].record("predict_breast_cancer_malignancy")  # simulated MCP
     deps["consult"](
-        question="What does this prediction suggest?",
+        question="Is this ML result clinically plausible?",
         findings={"prediction": "malignant", "confidence": 0.989},
     )
-    result = deps["final"](response="High-confidence finding — refer for biopsy.")
-    assert result == {"response": "High-confidence finding — refer for biopsy."}
+    result = deps["final"](response="High-confidence finding; refer for biopsy.")
+    assert result == {"response": "High-confidence finding; refer for biopsy."}
 
 
-def test_happy_path_expert_before_ml(deps):
-    """Expert can be consulted first — order is free."""
+def test_blocked_when_ml_before_expert(deps):
     deps["history"](handle="seed-001")
-    deps["consult"](question="Which model should we run?", findings={})
+    deps["enforcer"].record("predict_breast_cancer_malignancy")
+    deps["consult"](question="Interpret this.", findings={"prediction": "malignant"})
+    with pytest.raises(ProtocolViolation, match="workflow order"):
+        deps["final"](response="anything")
+
+
+def test_blocked_without_post_ml_expert(deps):
+    deps["history"](handle="seed-001")
+    deps["consult"](question="Pre-consult.", findings={})
     deps["enforcer"].record("predict_diabetes_risk")
-    result = deps["final"](response="Risk profile suggests follow-up labs.")
-    assert "response" in result
+    with pytest.raises(ProtocolViolation, match="workflow order"):
+        deps["final"](response="anything")
 
 
 def test_blocked_when_skipping_ml(deps):
@@ -66,12 +75,14 @@ def test_blocked_when_skipping_expert(deps):
 
 def test_trajectory_records_full_sequence(deps):
     deps["history"](handle="seed-001")
+    deps["consult"](question="Pre-consult.", findings={})
     deps["enforcer"].record("predict_breast_cancer_malignancy")
-    deps["consult"](question="?", findings={})
+    deps["consult"](question="Post-consult.", findings={})
     deps["final"](response="ok")
 
     assert deps["enforcer"].trajectory == (
         "get_patient_history",
+        "consult_medical_expert",
         "predict_breast_cancer_malignancy",
         "consult_medical_expert",
         "final_report",

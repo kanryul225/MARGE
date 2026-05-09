@@ -24,9 +24,8 @@ TOOL_DESCRIPTION = (
     "ANSWER. The `response` field accepts free-form natural language — use it for "
     "the recommendation, an abstention ('I cannot give reliable guidance — please "
     "see a doctor'), or a follow-up question ('please provide X, Y, Z'). The "
-    "orchestrator framework refuses to call this tool unless at least one ML "
-    "prediction (predict_*) and one consult_medical_expert call have already "
-    "occurred in this turn."
+    "orchestrator framework refuses to call this tool unless the trajectory "
+    "contains consult_medical_expert -> predict_* -> consult_medical_expert."
 )
 
 

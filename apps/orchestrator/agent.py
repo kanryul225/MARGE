@@ -27,12 +27,15 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
 from apps.orchestrator.requirements.marge_protocol import (
-    build_marge_protocol_requirement,
+    build_marge_protocol_requirements,
 )
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.final_report import make_final_report
 from apps.orchestrator.tools.patient_history import make_patient_history
-from services.medical_expert_agent.agent import StubMedicalExpert
+from services.medical_expert_agent.agent import (
+    MedicalExpert,
+    build_medical_expert_agent,
+)
 from services.patient_data_mcp_server.sources._base import PatientSource
 from services.patient_data_mcp_server.sources.sqlite_db import SqlitePatientSource
 
@@ -55,10 +58,11 @@ class OrchestratorBundle:
 
 def build_bundle(
     patient_source: PatientSource | None = None,
+    expert: MedicalExpert | None = None,
 ) -> OrchestratorBundle:
     """Build the orchestrator's deterministic dependencies."""
     enforcer = ProtocolEnforcer()
-    expert = StubMedicalExpert()
+    expert = expert or build_medical_expert_agent()
     source = patient_source or SqlitePatientSource()
 
     local_tools = {
@@ -110,7 +114,7 @@ async def orchestrator_agent(
             llm=llm,
             memory=UnconstrainedMemory(),
             tools=[*local_tools, *ml_tools],
-            requirements=[build_marge_protocol_requirement()],
+            requirements=build_marge_protocol_requirements(t.name for t in ml_tools),
             name="MARGE Orchestrator",
             description=(
                 "Clinical ML head researcher: orchestrates ML tools and a "
