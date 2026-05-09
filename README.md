@@ -16,10 +16,11 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 # 1. Create the venv and install core dependencies
 uv sync
 
-# 2. Train the dummy ML model (creates services/ml_mcp_server/artifacts/breast_cancer_xgb.joblib)
+# 2. Train the demo ML models (writes joblib artifacts under services/ml_mcp_server/artifacts/)
 uv run python -m packages.ml_training.train_breast_cancer
+uv run python -m packages.ml_training.train_diabetes
 
-# 3. Smoke test: ML model -> MCP server -> in-process MCP client
+# 3. Smoke test: walks every registered model and verifies direct call == MCP call
 uv run python scripts/smoke_test.py
 ```
 

@@ -1,10 +1,13 @@
-"""End-to-end smoke test for the thin slice.
+"""End-to-end smoke test for the MCP layer.
 
-Verifies:
-1. The trained ML model loads and produces a Prediction with SHAP scores.
-2. The MCP server registers the model as a tool with the correct schema.
+Walks every MLModel discovered by the registry and verifies, for each one:
+1. It loads, exposes its metadata, and produces a Prediction with SHAP scores.
+2. The MCP server registers it as a tool with the correct schema.
 3. The MCP tool can be invoked in-process via the FastMCP client and returns
-   the same Prediction shape.
+   a Prediction whose predicted_class agrees with the direct call.
+
+Adding a new model file under `services/ml_mcp_server/models/` is enough —
+this script does not need to know the model's name.
 
 Run: `python scripts/smoke_test.py`
 """
@@ -18,85 +21,91 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastmcp import Client
-from sklearn.datasets import load_breast_cancer
 
-from packages.schemas.prediction import Prediction
-from services.ml_mcp_server.models.breast_cancer_xgb import BreastCancerXGB
+from services.ml_mcp_server.models._base import MLModel
+from services.ml_mcp_server.registry import discover_models
 from services.ml_mcp_server.server import build_server
 
 
-def _sample_inputs() -> dict[str, float]:
-    """Take the first row of the dataset as a synthetic patient."""
-    data = load_breast_cancer()
-    return {
-        name.replace(" ", "_"): float(val)
-        for name, val in zip(data.feature_names, data.data[0], strict=False)
-    }
-
-
-def _direct_call() -> Prediction:
-    print("\n[1] Direct MLModel.predict() ----")
-    model = BreastCancerXGB()
-    print(f"    Loaded: {model.name}")
+def _direct_call(model: MLModel) -> str:
+    """Run model.predict on its own sample_inputs. Returns predicted_class."""
+    print(f"\n[direct] {model.name}")
+    print(f"    Trained on:    {model.metadata.trained_on}")
     print(f"    Test accuracy: {model.metadata.test_accuracy:.3f}")
+    print(f"    Features:      {model.metadata.feature_count}")
 
-    inputs = model.input_schema(**_sample_inputs())
+    inputs = model.input_schema(**model.sample_inputs())
     pred = model.predict(inputs)
 
-    print(f"    Predicted: {pred.predicted_class}  (confidence={pred.confidence:.3f})")
-    print(f"    Class probs: {pred.class_probabilities}")
+    print(f"    -> {pred.predicted_class}  (confidence={pred.confidence:.3f})")
     print(f"    Top XAI features:")
-    for s in pred.xai_scores:
+    for s in pred.xai_scores[:3]:
         sign = "+" if s.contribution > 0 else "-"
         print(
-            f"      {sign} {s.feature_name:<30s} "
+            f"      {sign} {s.feature_name:<32s} "
             f"contribution={s.contribution:+.4f}  value={s.feature_value:.3f}"
         )
-    return pred
+    return pred.predicted_class or ""
 
 
-async def _mcp_call() -> dict:
-    print("\n[2] MCP server -> in-process Client ----")
-    server = build_server()
-
-    async with Client(server) as client:
-        tools = await client.list_tools()
-        tool_names = [t.name for t in tools]
-        print(f"    Registered tools: {tool_names}")
-        assert "predict_breast_cancer_malignancy" in tool_names
-
-        result = await client.call_tool(
-            "predict_breast_cancer_malignancy",
-            {"inputs": _sample_inputs()},
-        )
-
-        # FastMCP wraps tool results; we expect structured content matching Prediction.
-        payload = result.data if hasattr(result, "data") else result
+def _coerce_payload(result) -> dict:
+    """Pull the JSON-shaped Prediction out of a FastMCP CallToolResult."""
+    if hasattr(result, "data") and result.data is not None:
+        payload = result.data
         if hasattr(payload, "model_dump"):
-            payload = payload.model_dump(mode="json")
-        elif not isinstance(payload, dict):
-            # Fallback: try parsing the first content block as JSON.
-            content = result.content[0] if hasattr(result, "content") else None
-            if content and hasattr(content, "text"):
-                payload = json.loads(content.text)
+            return payload.model_dump(mode="json")
+        if isinstance(payload, dict):
+            return payload
+    if hasattr(result, "content") and result.content:
+        block = result.content[0]
+        if hasattr(block, "text"):
+            return json.loads(block.text)
+    raise RuntimeError(f"Unexpected MCP tool result shape: {result!r}")
 
-        print(f"    MCP tool result (predicted_class): {payload.get('predicted_class')}")
-        print(f"    MCP tool result (confidence): {payload.get('confidence'):.3f}")
-        return payload
+
+async def _mcp_call(client: Client, model: MLModel) -> str:
+    """Call the same model via the in-process MCP client. Returns predicted_class."""
+    result = await client.call_tool(model.name, {"inputs": model.sample_inputs()})
+    payload = _coerce_payload(result)
+    print(
+        f"[ mcp ] {model.name}  "
+        f"-> {payload.get('predicted_class')}  "
+        f"(confidence={payload.get('confidence'):.3f})"
+    )
+    return payload.get("predicted_class") or ""
 
 
 async def main() -> None:
     print("=" * 64)
-    print(" MARGE thin-slice smoke test")
+    print(" MARGE smoke test")
     print("=" * 64)
 
-    direct = _direct_call()
-    mcp = await _mcp_call()
+    models = discover_models()
+    if not models:
+        sys.exit(
+            "No MLModel discovered. Did you forget to train artifacts?\n"
+            "  python -m packages.ml_training.train_breast_cancer\n"
+            "  python -m packages.ml_training.train_diabetes"
+        )
+    print(f"\nDiscovered {len(models)} model(s): {[m.name for m in models]}")
 
-    # Sanity: predicted class agrees across both paths
-    assert (
-        direct.predicted_class == mcp.get("predicted_class")
-    ), f"Mismatch: direct={direct.predicted_class}  mcp={mcp.get('predicted_class')}"
+    direct_results = {m.name: _direct_call(m) for m in models}
+
+    print("\n" + "-" * 64)
+    print(" MCP server in-process call")
+    print("-" * 64)
+    server = build_server()
+    async with Client(server) as client:
+        tools = await client.list_tools()
+        tool_names = {t.name for t in tools}
+        print(f"\nRegistered tools: {sorted(tool_names)}")
+
+        for m in models:
+            assert m.name in tool_names, f"Tool {m.name} missing from MCP server"
+            mcp_class = await _mcp_call(client, m)
+            assert mcp_class == direct_results[m.name], (
+                f"{m.name}: direct={direct_results[m.name]}  mcp={mcp_class}"
+            )
 
     print("\nSmoke test PASSED.")
 

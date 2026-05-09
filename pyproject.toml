@@ -12,6 +12,7 @@ dependencies = [
 
     # ML stack
     "xgboost>=2.0",
+    "catboost>=1.2",
     "scikit-learn>=1.4",
     "shap>=0.45",
     "pandas>=2.0",

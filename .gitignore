@@ -21,6 +21,9 @@ data/
 **/corpus/
 **/seed/*.sqlite
 
+# CatBoost training metadata (auto-generated)
+catboost_info/
+
 # OS / editor
 .DS_Store
 .idea/

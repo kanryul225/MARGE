@@ -7,6 +7,7 @@ Train the artifact: `python -m packages.ml_training.train_breast_cancer`
 """
 
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -77,6 +78,13 @@ class BreastCancerXGB(MLModel):
     @property
     def input_schema(self) -> type[BaseModel]:
         return BreastCancerInputs
+
+    def sample_inputs(self) -> dict[str, Any]:
+        """First row of the dataset — a real malignant case."""
+        return {
+            _sanitize(name): float(val)
+            for name, val in zip(_FEATURE_NAMES, _DATASET.data[0], strict=False)
+        }
 
     def predict(self, inputs: BaseModel) -> Prediction:
         data = inputs.model_dump()

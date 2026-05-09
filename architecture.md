@@ -116,9 +116,9 @@ IBMHackathon/
 │   │   ├── server.py              # FastMCP entry; one tool per registered model
 │   │   ├── registry.py            # auto-discovers files in models/ at startup
 │   │   ├── models/                # one file per model — drop-in extension point
-│   │   │   ├── _base.py           # MLModel ABC (predict, explain, metadata)
-│   │   │   ├── diabetes_xgb.py
-│   │   │   ├── cvd_catboost.py
+│   │   │   ├── _base.py           # MLModel ABC (metadata, schema, predict, sample_inputs)
+│   │   │   ├── breast_cancer_xgb.py    # XGBoost on Wisconsin Diagnostic
+│   │   │   ├── diabetes_catboost.py    # CatBoost on Pima Indians (OpenML)
 │   │   │   └── ...                # add new models here, no other edits needed
 │   │   ├── explainers/
 │   │   │   └── shap_wrapper.py    # shared SHAP utility for all models
