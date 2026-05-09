@@ -1,19 +1,8 @@
-"""Tests for the orchestrator's local tool factories.
-
-Two local tools after patient data moved to MCP:
-- consult_expert  — dispatches to the medical_expert_agent + records call
-- final_report    — gated terminal tool (ProtocolEnforcer.check_finalize)
-
-patient_history is tested separately as a standalone tool; it is no longer
-wired into the bundle but the factory is preserved for direct use.
-"""
+"""Tests for the orchestrator's local tool factories."""
 
 import pytest
 
-from apps.orchestrator.middleware.enforce_protocol import (
-    ProtocolEnforcer,
-    ProtocolViolation,
-)
+from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.final_report import make_final_report
 from apps.orchestrator.tools.patient_history import make_patient_history
@@ -67,27 +56,18 @@ class TestPatientHistoryTool:
 
 
 class TestFinalReportTool:
-    @staticmethod
-    def _ready_enforcer() -> ProtocolEnforcer:
-        enforcer = ProtocolEnforcer()
-        enforcer.record("consult_medical_expert")
-        enforcer.record("predict_diabetes_risk")
-        enforcer.record("consult_medical_expert")
-        return enforcer
-
-    def test_blocks_when_no_ml_called(self):
+    def test_allows_missing_info_response_without_ml(self):
         enforcer = ProtocolEnforcer()
         enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)
-        with pytest.raises(ProtocolViolation, match="ML model"):
-            final(response="anything")
+        result = final(response="Please provide age, BMI, and blood sugar.")
+        assert result == {"response": "Please provide age, BMI, and blood sugar."}
 
-    def test_blocks_when_no_expert_called(self):
+    def test_allows_response_without_expert_for_no_data_turn(self):
         enforcer = ProtocolEnforcer()
-        enforcer.record("predict_breast_cancer_malignancy")
         final = make_final_report(enforcer)
-        with pytest.raises(ProtocolViolation, match="expert"):
-            final(response="anything")
+        result = final(response="I need medical measurements before risk scoring.")
+        assert result == {"response": "I need medical measurements before risk scoring."}
 
     def test_succeeds_when_workflow_sequence_called(self):
         enforcer = ProtocolEnforcer()
@@ -95,43 +75,16 @@ class TestFinalReportTool:
         enforcer.record("predict_breast_cancer_malignancy")
         enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)
-        result = final(response="High-confidence findings — refer for biopsy.")
-        assert result == {"response": "High-confidence findings — refer for biopsy."}
+        result = final(response="High-confidence findings; refer for biopsy.")
+        assert result == {"response": "High-confidence findings; refer for biopsy."}
 
     def test_records_final_report_call(self):
-        enforcer = self._ready_enforcer()
+        enforcer = ProtocolEnforcer()
         final = make_final_report(enforcer)
         final(response="All clear.")
         assert enforcer.has_called("final_report")
 
     def test_returns_response_dict(self):
-        final = make_final_report(self._ready_enforcer())
+        final = make_final_report(ProtocolEnforcer())
         result = final(response="All clear.")
         assert result == {"response": "All clear."}
-
-    @pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
-    def test_raises_without_ml_call(self):
-        enforcer = ProtocolEnforcer()
-        enforcer.record("consult_medical_expert")
-        return enforcer
-
-    def test_returns_response_dict(self):
-        final = make_final_report(self._ready_enforcer())
-        result = final(response="All clear.")
-        assert result == {"response": "All clear."}
-
-    @pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
-    def test_raises_without_ml_call(self):
-        enforcer = ProtocolEnforcer()
-        enforcer.record("consult_medical_expert")
-        final = make_final_report(enforcer)
-        with pytest.raises(ProtocolViolation, match="ML model"):
-            final(response="too early")
-
-    @pytest.mark.skip(reason="MARGE protocol requirement temporarily disabled")
-    def test_raises_without_expert_call(self):
-        enforcer = ProtocolEnforcer()
-        enforcer.record("predict_diabetes_risk")
-        final = make_final_report(enforcer)
-        with pytest.raises(ProtocolViolation, match="expert"):
-            final(response="too early")

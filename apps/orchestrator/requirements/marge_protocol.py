@@ -1,24 +1,17 @@
-"""BeeAI Requirements encoding the MARGE workflow.
+"""Disabled BeeAI Requirements for the MARGE workflow.
 
-The workflow is:
+The previous runtime gate enforced:
 
     consult_medical_expert -> predict_* -> consult_medical_expert -> final_report
 
-Two structural layers enforce this:
-
-- Each discovered `predict_*` tool is disallowed until at least one expert
-  pre-consult has succeeded.
-- `final_report` is disallowed until the successful trajectory contains an
-  expert pre-consult, at least one ML prediction after that consult, and an
-  expert post-consult after the ML result.
+That made no-data, missing-info, and information-only turns fail because the
+agent could not call `final_report` until an ML tool succeeded. For now, the
+BeeAI ConditionalRequirements are intentionally disabled; the workflow remains
+prompt guidance rather than a hard tool-availability gate.
 """
 
 from collections.abc import Iterable
 from typing import Any
-
-from beeai_framework.agents.requirement.requirements.conditional import (
-    ConditionalRequirement,
-)
 
 
 _TERMINAL_TOOL_NAME = "final_report"
@@ -82,48 +75,14 @@ def has_expert_ml_expert_sequence(state: Any) -> bool:
     return False
 
 
-def _build_ml_preconsult_requirement(tool_name: str) -> ConditionalRequirement:
-    return ConditionalRequirement(
-        target=tool_name,
-        custom_checks=[has_consulted_expert],
-        only_success_invocations=True,
-        reason=(
-            f"{tool_name} requires a successful consult_medical_expert pre-consult "
-            "before any ML prediction tool can run."
-        ),
-    )
-
-
-def build_marge_protocol_requirement() -> ConditionalRequirement:
-    """Construct the terminal Requirement that gates `final_report`.
-
-    - `custom_checks` keeps `final_report` disallowed until the successful
-      trajectory contains expert -> ML -> expert.
-    - `min_invocations=1` keeps `prevent_stop=True` until `final_report` has
-      been called at least once, so the agent cannot terminate without
-      producing a final report.
-    """
-    return ConditionalRequirement(
-        target=_TERMINAL_TOOL_NAME,
-        custom_checks=[has_expert_ml_expert_sequence],
-        min_invocations=1,
-        only_success_invocations=True,
-        reason=(
-            "final_report requires a successful workflow sequence: "
-            "consult_medical_expert -> predict_* -> consult_medical_expert."
-        ),
-    )
+def build_marge_protocol_requirement() -> None:
+    """Return no terminal BeeAI requirement while runtime gating is disabled."""
+    return None
 
 
 def build_marge_protocol_requirements(
     ml_tool_names: Iterable[str] = (),
-) -> list[ConditionalRequirement]:
-    """Build all structural requirements for the current tool surface."""
-    return [
-        *[
-            _build_ml_preconsult_requirement(name)
-            for name in ml_tool_names
-            if name.startswith(_ML_PREDICTION_PREFIX)
-        ],
-        build_marge_protocol_requirement(),
-    ]
+) -> list[Any]:
+    """Return no BeeAI requirements for the current tool surface."""
+    _ = tuple(ml_tool_names)
+    return []

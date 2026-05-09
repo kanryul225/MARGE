@@ -23,9 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
-from apps.orchestrator.requirements.marge_protocol import (
-    build_marge_protocol_requirements,
-)
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.final_report import make_final_report
 from services.medical_expert_agent.agent import (
@@ -119,11 +116,14 @@ async def orchestrator_agent(
         for tool in ml_tools:
             tool.emitter.match("*", _make_recorder(tool.name))
 
-        requirements = build_marge_protocol_requirements(tool.name for tool in ml_tools)
         common_kwargs = {
             "llm": llm,
             "memory": UnconstrainedMemory(),
-            "requirements": requirements,
+            # BeeAI ConditionalRequirements are temporarily disabled. The
+            # orchestrator prompt still describes the preferred clinical flow,
+            # but final_report remains available for missing-info and
+            # information-only answers that cannot run ML safely.
+            "requirements": [],
             "name": "MARGE Orchestrator",
             "instructions": bundle.system_prompt,
             "final_answer_as_tool": False,

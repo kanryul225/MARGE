@@ -1,11 +1,11 @@
-"""Tests for the BeeAI Requirements that encode the MARGE workflow.
+"""Tests for disabled BeeAI Requirements helpers.
 
-The enforced workflow is:
+The preferred workflow used to be enforced at the BeeAI requirement layer:
 
     consult_medical_expert -> predict_* -> consult_medical_expert -> final_report
 
-`predict_*` tools require an expert pre-consult, and `final_report` requires
-the full expert -> ML -> expert sequence.
+Runtime gating is currently disabled so no-data and missing-info turns can
+call `final_report` without forcing an ML prediction.
 """
 
 from dataclasses import dataclass
@@ -108,17 +108,11 @@ class TestWorkflowSequence:
 
 
 class TestRequirementBuilder:
-    def test_build_terminal_requirement_targets_final_report(self):
-        from beeai_framework.agents.requirement.requirements.conditional import (
-            ConditionalRequirement,
-        )
+    def test_build_terminal_requirement_is_disabled(self):
+        assert build_marge_protocol_requirement() is None
 
-        req = build_marge_protocol_requirement()
-        assert isinstance(req, ConditionalRequirement)
-        assert req.source == "final_report"
-
-    def test_build_all_requirements_includes_ml_and_final_targets(self):
+    def test_build_all_requirements_returns_empty_list(self):
         reqs = build_marge_protocol_requirements(
             ["predict_diabetes_risk", "not_a_predictor"]
         )
-        assert [req.source for req in reqs] == ["predict_diabetes_risk", "final_report"]
+        assert reqs == []
