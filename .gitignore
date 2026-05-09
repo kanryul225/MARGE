@@ -1,0 +1,33 @@
+# Claude Code local-only settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.uv/
+*.egg-info/
+dist/
+build/
+
+# Data / artifacts (large binaries)
+data/
+**/artifacts/
+**/corpus/
+**/seed/*.sqlite
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env / secrets
+.env
+.env.local
+*.key
