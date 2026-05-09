@@ -24,7 +24,7 @@ load_dotenv(ROOT / ".env")
 from apps.orchestrator.agent import build_bundle, orchestrator_agent
 from packages.llm_provider.client import build_chat_model_for_role
 from packages.llm_provider.settings import Role, RoleConfig
-from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, seed_demo_db
+from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, init_empty_db
 
 
 # ---------------------------------------------------------------------------
@@ -32,15 +32,15 @@ from services.patient_data_mcp_server.sources.csv_ingest import ingest_csv, seed
 # ---------------------------------------------------------------------------
 
 def _get_or_create_session_db() -> Path:
-    """Return the session-scoped SQLite path, seeding demo data if needed."""
+    """Return the session-scoped SQLite path, creating an empty DB if needed."""
     if "session_id" not in st.session_state:
         st.session_state["session_id"] = uuid.uuid4().hex[:8]
 
     db_path = SESSIONS_DIR / f"{st.session_state['session_id']}.db"
     if not db_path.exists():
-        seed_demo_db(db_path)
-        st.session_state["patients"] = ["seed-001"]
-        st.session_state["current_patient"] = "seed-001"
+        init_empty_db(db_path)
+        st.session_state["patients"] = []
+        st.session_state["current_patient"] = None
     return db_path
 
 
@@ -267,8 +267,14 @@ def _app_main() -> None:
                 st.session_state.pop("messages", None)
                 st.success(f"Loaded {len(handles)} patient(s).")
 
-        patients: list[str] = st.session_state.get("patients", ["seed-001"])
-        if len(patients) > 1:
+        patients: list[str] = st.session_state.get("patients", [])
+        if not patients:
+            st.caption("No patients loaded. Upload a CSV to start.")
+            st.session_state["current_patient"] = None
+        elif len(patients) == 1:
+            st.caption(f"Patient: `{patients[0]}`")
+            st.session_state["current_patient"] = patients[0]
+        else:
             current = st.selectbox(
                 "Active patient",
                 patients,
@@ -277,9 +283,6 @@ def _app_main() -> None:
             if current != st.session_state.get("current_patient"):
                 st.session_state["current_patient"] = current
                 st.session_state.pop("messages", None)
-        else:
-            st.caption(f"Patient: `{patients[0]}`")
-            st.session_state["current_patient"] = patients[0]
 
         st.markdown("---")
         if st.button("Clear conversation", use_container_width=True):
@@ -293,17 +296,17 @@ def _app_main() -> None:
                 st.json(st.session_state.get("messages", []))
 
     # --- Chat ---
+    current_patient = st.session_state.get("current_patient")
+    no_patients = not current_patient
+
     if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": (
-                    "Tell me about the patient, or share any clinical values you have "
-                    "(age, blood sugar, BMI, blood pressure, etc.) and I'll run the analysis."
-                ),
-                "trajectory": [],
-            }
-        ]
+        welcome = (
+            "Upload a patient CSV from the sidebar to get started."
+            if no_patients else
+            "Tell me about the patient, or share any clinical values you have "
+            "(age, blood sugar, BMI, blood pressure, etc.) and I'll run the analysis."
+        )
+        st.session_state.messages = [{"role": "assistant", "content": welcome, "trajectory": []}]
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -312,13 +315,11 @@ def _app_main() -> None:
             else:
                 st.markdown(message["content"])
 
-    user_input = st.chat_input("Message")
+    user_input = st.chat_input("Message", disabled=no_patients)
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input, "trajectory": []})
         with st.chat_message("user"):
             st.markdown(user_input)
-
-        current_patient = st.session_state.get("current_patient", "seed-001")
 
         with st.chat_message("assistant"):
             with st.status("Running", expanded=False):
