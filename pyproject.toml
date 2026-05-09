@@ -1,0 +1,68 @@
+[project]
+name = "marge"
+version = "0.1.0"
+description = "MARGE — Multi-agent ML-Reasoning Guidance Engine. Clinical ML orchestration system that wraps niche tabular ML models behind an LLM orchestrator, with a medical expert sub-agent for clinical reasoning."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # core schemas + utility
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+
+    # ML stack
+    "xgboost>=2.0",
+    "scikit-learn>=1.4",
+    "shap>=0.45",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "joblib>=1.3",
+
+    # MCP
+    "fastmcp>=2.0",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+orchestrator = [
+    # Agent framework + LLM providers
+    # NOTE: BeeAI Framework — install with the package name available on PyPI;
+    # if `beeai-framework` is not yet on PyPI, replace with the github install line.
+    "beeai-framework>=0.1",
+    "anthropic>=0.39",
+    "ibm-watsonx-ai>=1.1",
+]
+ui = [
+    "streamlit>=1.32",
+    "matplotlib>=3.8",
+    "plotly>=5.20",
+]
+medical-kb = [
+    "chromadb>=0.5",
+    "sentence-transformers>=2.7",
+    "tavily-python>=0.3",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps", "services", "packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
