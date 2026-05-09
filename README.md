@@ -22,6 +22,13 @@ uv run python -m packages.ml_training.train_diabetes
 
 # 3. Smoke test: walks every registered model and verifies direct call == MCP call
 uv run python scripts/smoke_test.py
+
+# 4. Run the full unit + integration test suite
+uv run pytest tests/ -v
+
+# 5. (optional, requires API key) Live end-to-end smoke through the BeeAI orchestrator
+export ANTHROPIC_API_KEY=sk-...
+uv run python scripts/orchestrator_smoke.py
 ```
 
 Optional dependency groups (install when working on those layers):

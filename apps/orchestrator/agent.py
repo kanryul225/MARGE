@@ -1,22 +1,23 @@
 """BeeAI orchestrator assembly.
 
-This module wires together:
-- ProtocolEnforcer (middleware that records every tool call)
-- Local tools (consult_expert, patient_history, final_report, abstain, ask_user_back)
-- ML tools (discovered dynamically via the FastMCP `ml-models` server)
-- An LLM backend through `packages.llm_provider.client`
+Two layers:
 
-It is intentionally thin: every domain rule and every clinical behaviour is
-implemented and unit-tested in the modules above. This file is just the
-glue layer that hands the assembled tool surface to BeeAI.
+`build_bundle()` returns the deterministic dependencies — enforcer, stubs,
+local tools, system prompt — exactly as architecture.md §4 specifies. This
+is what every test reaches for; it has no LLM dependency.
 
-NOTE: This module is **not unit-tested** — exercising it requires a live
-LLM. Use `scripts/orchestrator_smoke.py` (next slice) for manual end-to-end
-verification with a real Anthropic / watsonx key.
+`build_orchestrator_agent(bundle, llm)` wraps the bundle into a fully
+configured BeeAI `ToolCallingAgent`: local tools converted to BeeAI Tools,
+ML tools auto-discovered from the in-process `ml-models` MCP server, system
+prompt mounted on the agent's metadata, memory attached. The LLM is passed
+in by the caller so tests can inject a fake one.
+
+Real-LLM smoke verification lives in `scripts/orchestrator_smoke.py`.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
 from apps.orchestrator.tools.abstain import make_abstain
@@ -28,16 +29,16 @@ from services.medical_expert_agent.agent import StubMedicalExpert
 from services.patient_data_mcp_server.sources._base import PatientSource
 from services.patient_data_mcp_server.sources.sqlite_db import SqlitePatientSource
 
+if TYPE_CHECKING:
+    from beeai_framework.agents.tool_calling import ToolCallingAgent
+    from beeai_framework.backend.chat import ChatModel
+
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
 
 
 @dataclass
 class OrchestratorBundle:
-    """All the deterministic pieces of the orchestrator, ready to be handed to BeeAI.
-
-    The BeeAI assembly itself is deferred to the next slice — once the
-    BeeAI Python API is verified end-to-end against a live LLM.
-    """
+    """Deterministic dependencies of the orchestrator (no LLM)."""
 
     enforcer: ProtocolEnforcer
     system_prompt: str
@@ -48,12 +49,7 @@ class OrchestratorBundle:
 def build_bundle(
     patient_source: PatientSource | None = None,
 ) -> OrchestratorBundle:
-    """Build the orchestrator's deterministic dependencies.
-
-    The BeeAI agent (LLM + tool dispatch loop) is constructed elsewhere
-    using this bundle. ML tools are discovered separately via the FastMCP
-    `ml-models` server and added to the BeeAI tool list at agent build time.
-    """
+    """Build the orchestrator's deterministic dependencies."""
     enforcer = ProtocolEnforcer()
     expert = StubMedicalExpert()
     source = patient_source or SqlitePatientSource()
@@ -71,4 +67,41 @@ def build_bundle(
         system_prompt=_SYSTEM_PROMPT_PATH.read_text(),
         local_tools=local_tools,
         patient_source=source,
+    )
+
+
+async def build_orchestrator_agent(
+    bundle: OrchestratorBundle,
+    llm: "ChatModel",
+) -> "RequirementAgent":
+    """Assemble a fully wired BeeAI RequirementAgent.
+
+    - Local tools are converted from the bundle's factory closures
+    - ML tools are auto-discovered from the in-process `ml-models` MCP server
+    - The system prompt is the agent's `instructions`
+    - Memory is `UnconstrainedMemory` (single-user, single-session demo)
+
+    Future work: declare the protocol invariants (ML+expert before final_report)
+    as BeeAI `Requirement`s rather than enforcing them inside the tool body —
+    that lifts the constraint into the agent loop's planning surface.
+    """
+    from beeai_framework.agents.requirement import RequirementAgent
+    from beeai_framework.memory import UnconstrainedMemory
+
+    from apps.orchestrator.mcp_discovery import discover_ml_mcp_tools
+    from apps.orchestrator.tools._adapter import local_tools_as_beeai
+
+    local_tools = local_tools_as_beeai(bundle)
+    ml_tools = await discover_ml_mcp_tools()
+
+    return RequirementAgent(
+        llm=llm,
+        memory=UnconstrainedMemory(),
+        tools=[*local_tools, *ml_tools],
+        name="MARGE Orchestrator",
+        description=(
+            "Clinical ML head researcher: orchestrates ML tools and a medical "
+            "expert sub-agent."
+        ),
+        instructions=bundle.system_prompt,
     )
