@@ -69,6 +69,34 @@ async def test_agent_uses_provided_llm():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_invocations_are_recorded_in_enforcer():
+    """ML calls go through MCP, not local closures — emitter hook records them."""
+    bundle = build_bundle()
+    async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
+        ml_tool = next(
+            t for t in agent._tools if t.name == "predict_diabetes_risk"
+        )
+        sample = {
+            "preg": 6.0, "plas": 148.0, "pres": 72.0, "skin": 35.0,
+            "insu": 0.0, "mass": 33.6, "pedi": 0.627, "age": 50.0,
+        }
+        await ml_tool.run({"inputs": sample})
+
+    assert bundle.enforcer.has_called("predict_diabetes_risk")
+
+
+@pytest.mark.asyncio
+async def test_final_answer_as_tool_disabled():
+    """BeeAI's auto-final-answer tool must be off — our final_report is the
+    only path to a user answer (architecture.md §2)."""
+    bundle = build_bundle()
+    async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
+        tool_names = {t.name for t in agent._tools}
+        # final_answer is the BeeAI auto-tool name when final_answer_as_tool=True.
+        assert "final_answer" not in tool_names
+
+
+@pytest.mark.asyncio
 async def test_system_prompt_marker_present_in_bundle():
     """The system prompt is fed to BeeAI's `instructions` parameter and merged
     into RequirementAgent's prompt template at run time. We verify that the

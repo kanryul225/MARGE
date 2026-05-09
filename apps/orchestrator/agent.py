@@ -117,5 +117,26 @@ async def orchestrator_agent(
                 "medical expert sub-agent."
             ),
             instructions=bundle.system_prompt,
+            # Disable BeeAI's automatic FinalAnswerTool — our `final_report`
+            # is the gated terminal tool from architecture.md §2 and must
+            # be the only path to a user answer.
+            final_answer_as_tool=False,
         )
+
+        # Hook the enforcer onto MCP tools only. Local tools already
+        # record themselves via the factory closures (test-covered).
+        # ML predictions go through MCP, so without this hook the
+        # finalize gate would never see a `predict_*` call and would
+        # incorrectly block final_report.
+        def _make_recorder(tool_name: str):
+            def _record(data, event) -> None:
+                # Fire only on the start event for each tool; using "*" so
+                # it matches across BeeAI's emitter namespacing.
+                if getattr(event, "name", None) == "start":
+                    bundle.enforcer.record(tool_name)
+            return _record
+
+        for t in ml_tools:
+            t.emitter.match("*", _make_recorder(t.name))
+
         yield agent
