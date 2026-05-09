@@ -6,7 +6,11 @@ See [`overview.md`](./overview.md) for the concept and [`architecture.md`](./arc
 
 ## Status
 
-This repository is at the **thin-slice** stage: ML model + MCP server work end-to-end. Orchestrator (BeeAI), medical expert sub-agent, and Streamlit UI are skeletoned but not yet wired up.
+- **ML stack** (XGBoost + CatBoost over MCP): two models registered, drop-in pattern verified.
+- **BeeAI orchestrator**: assembled (`RequirementAgent`, 5 local tools + 2 MCP-discovered ML tools), protocol middleware enforced; live LLM tested against NVIDIA NIM (Qwen3.5-397B).
+- **LLM provider abstraction** (`packages/llm_provider/`): five providers (Anthropic, watsonx, Cerebras, NVIDIA NIM, Chutes) + per-role routing (orchestrator vs medical expert) + opt-in `FallbackChatModel`.
+- **Medical expert sub-agent**: stub returning a fixed `MedicalExpertResponse` — real BeeAI sub-agent + RAG / web search wiring is the next slice.
+- **Streamlit UI**: not started.
 
 ## Setup
 
@@ -26,9 +30,13 @@ uv run python scripts/smoke_test.py
 # 4. Run the full unit + integration test suite
 uv run pytest tests/ -v
 
-# 5. (optional, requires API key) Live end-to-end smoke through the BeeAI orchestrator
-export ANTHROPIC_API_KEY=sk-...
+# 5. (optional, requires LLM API keys) Live end-to-end smoke through the BeeAI orchestrator
+cp .env.example .env  # then paste your provider keys
+uv sync --extra orchestrator
 uv run python scripts/orchestrator_smoke.py
+
+# 5b. Step-by-step diagnostic of the orchestrator pipeline (each phase printed)
+uv run python -u scripts/diag_agent.py
 ```
 
 Optional dependency groups (install when working on those layers):
