@@ -316,10 +316,12 @@ def _app_main() -> None:
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            if message.get("report"):
-                render_report(message["content"])
-            else:
-                st.markdown(message["content"])
+            st.markdown(message["content"])
+            traj = message.get("trajectory") or []
+            if traj:
+                with st.expander("Tool calls", expanded=False):
+                    for tool in traj:
+                        st.markdown(f"- `{tool}`")
 
     user_input = st.chat_input("Message")
     if user_input:
@@ -336,9 +338,11 @@ def _app_main() -> None:
                     error_msg = f"{type(exc).__name__}: {exc}"
                     response = f"Run failed: `{error_msg}`"
                     trajectory = []
-                    st.error(response)
-                else:
-                    render_report(response)
+                st.markdown(response)
+                if trajectory:
+                    with st.expander("Tool calls", expanded=False):
+                        for tool in trajectory:
+                            st.markdown(f"- `{tool}`")
 
         _append_chat_log(
             session_id=st.session_state.get("session_id", "unknown"),
@@ -350,7 +354,7 @@ def _app_main() -> None:
         )
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": response, "trajectory": trajectory, "report": True}
+            {"role": "assistant", "content": response, "trajectory": trajectory}
         )
 
 
