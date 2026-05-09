@@ -5,8 +5,15 @@
 `FallbackChatModel`                  — try primary, fall back to secondary
                                         on any exception. Other attribute
                                         access is proxied to primary.
+
+Per-provider throttle: free-tier Cerebras and NVIDIA NIM enforce strict
+RPM limits and reject burst calls. We subclass `OpenAIChatModel` and
+override `_create` / `_create_stream` to insert an `asyncio.sleep` so
+back-to-back agent iterations stay under the per-minute cap.
 """
 
+import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from packages.llm_provider.settings import (
@@ -18,6 +25,16 @@ from packages.llm_provider.settings import (
 
 if TYPE_CHECKING:
     from beeai_framework.backend.chat import ChatModel
+
+
+# Min seconds between consecutive requests per provider (free tier).
+# Cerebras 30 RPM nominal but in practice the new-account quota appears
+# tighter — bumped to 4.0s. NVIDIA NIM 40 RPM = 1.5s; padded to 1.7s.
+_THROTTLE_SECONDS = {
+    Provider.CEREBRAS: 4.0,
+    Provider.NVIDIA: 1.7,
+    Provider.CHUTES: 0.0,  # account-based; throttling moot until credits added
+}
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +77,9 @@ def _build_openai_compat(s: LLMSettings, key_var: str) -> "ChatModel":
         raise ValueError(f"{key_var} is required when LLM_PROVIDER={s.provider.value}.")
     from beeai_framework.adapters.openai.backend.chat import OpenAIChatModel
 
+    throttle = _THROTTLE_SECONDS.get(s.provider, 0.0)
+    cls = _make_throttled_chat_model_cls(OpenAIChatModel, throttle) if throttle > 0 else OpenAIChatModel
+
     # NOTE 1: tool_call_fallback_via_response_format=False forces BeeAI to
     # send native OpenAI `tools` instead of a `response_format=json_schema`
     # anyOf-over-all-tools. The fallback path is unsupported by most
@@ -69,13 +89,45 @@ def _build_openai_compat(s: LLMSettings, key_var: str) -> "ChatModel":
     # and Chutes do not honour `tool_choice={"required"}`; BeeAI's default
     # raises if it asks for a tool call and the model returns plain text.
     # Restricting to {"auto","single","none"} lets BeeAI plan around it.
-    return OpenAIChatModel(
+    return cls(
         model_id=s.model_id,
         api_key=s.api_key,
         base_url=s.base_url,
         tool_call_fallback_via_response_format=False,
         tool_choice_support={"auto", "single", "none"},
     )
+
+
+def _make_throttled_chat_model_cls(base_cls, min_gap_seconds: float):
+    """Return a subclass of `base_cls` that sleeps to enforce a min inter-call gap.
+
+    Works for any LiteLLM-backed BeeAI ChatModel — overrides the inner
+    `_create` and `_create_stream` async methods, which are the actual
+    network entry points.
+    """
+    last_call_time = [0.0]
+    lock = asyncio.Lock()
+
+    async def _sleep_if_needed() -> None:
+        async with lock:
+            elapsed = time.monotonic() - last_call_time[0]
+            if elapsed < min_gap_seconds:
+                await asyncio.sleep(min_gap_seconds - elapsed)
+            last_call_time[0] = time.monotonic()
+
+    class ThrottledChatModel(base_cls):  # type: ignore[misc, valid-type]
+        async def _create(self, input, run):  # type: ignore[override]
+            await _sleep_if_needed()
+            return await super()._create(input, run)
+
+        async def _create_stream(self, input, _):  # type: ignore[override]
+            await _sleep_if_needed()
+            async for out in super()._create_stream(input, _):
+                yield out
+
+    ThrottledChatModel.__name__ = f"Throttled{base_cls.__name__}"
+    ThrottledChatModel.__qualname__ = ThrottledChatModel.__name__
+    return ThrottledChatModel
 
 
 def _build_cerebras(s: LLMSettings) -> "ChatModel":

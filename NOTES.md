@@ -32,27 +32,57 @@ in `packages/llm_provider/client._build_openai_compat`:
    so `_DEFAULT_NVIDIA_MODEL` now points at the 80B variant. Override
    with `NVIDIA_MODEL_ID=qwen/qwen3.5-397b-a17b` once NIM stabilises.
 
-### Status after fixes
+### Status after fixes (slice "A" complete)
 
-What works (verified):
+What works end-to-end (verified live):
 
-- All 5 providers register and `build_chat_model()` returns the right adapter.
+- 5 providers register; `build_chat_model()` returns the right adapter.
 - Direct `ChatModel.run([UserMessage(...)])` succeeds for Cerebras and
-  NVIDIA NIM (80B variant) and the request body now uses native `tools`.
-- The 7-tool surface (5 local + 2 ML MCP) registers correctly on the agent.
+  NVIDIA NIM (80B variant) using native `tools=[...]`.
+- The 7-tool surface (5 local + 2 ML MCP) is exposed on the agent.
+- `orchestrator_agent` async-context-manager keeps the MCP session
+  open for the lifetime of `agent.run()` — MCP tool calls succeed
+  with no `ToolError`.
+- `final_answer_as_tool=False` removes BeeAI's auto-final tool, so
+  the only path to a user answer is our gated `final_report`.
+- Emitter hook on each MCP tool records `predict_*` calls into the
+  `ProtocolEnforcer` trajectory.
+- Per-provider throttle subclass on `OpenAIChatModel._create` enforces
+  inter-call gap (Cerebras 4.0s, NVIDIA 1.7s).
 
-What's still under verification:
+Live agent loop on NVIDIA NIM (Qwen3-Next-80B), trajectory observed:
+- iter 1: `get_patient_history(seed-001)` ✓
+- iter 2: `predict_breast_cancer_malignancy(...)` ✓ (recorded via emitter)
+- iter 3: `predict_diabetes_risk(...)` ✓
+- ✗ `consult_medical_expert` not called — Qwen 80B emitted the call
+  as `<tool_call>...</tool_call>` text inside the answer body
+  instead of an actual tool call (model-quality issue, not wiring)
+- ✗ `final_report` consequently not reached
 
-- **Full multi-iteration loop** against the live providers — being
-  re-tested with the three fixes above. Cerebras's 30 RPM still requires
-  a small inter-call gap; throttle/retry layer is the next slice if the
-  bare loop hits 429 before reaching `final_report`.
+What's currently blocked (provider-side, not code):
 
-What doesn't yet work (deferred):
+- **Cerebras `csk-…` key has exhausted its rolling-60s quota window.**
+  Direct `curl` to the API returns 429 immediately. Even with our 4.0s
+  throttle, the very first agent call gets 429. Wait ~1 hour for the
+  window to clear, or use a fresh key.
+- **NVIDIA NIM `qwen3.5-397b-a17b`** still capacity-throttled — single
+  `curl "hi"` times out. We default to `qwen3-next-80b-a3b-instruct`.
+- **Chutes**: marketed as free, but the API returns 402 (TAO balance
+  required). Configured for the day credits are added.
 
-- **Chutes**: marketed as free, but the API returns
-  `402 Quota exceeded and account balance is $0.0`. Configured but unusable
-  until the account has TAO/credits.
+Next slice options (in priority order):
+
+1. **Stronger orchestrator model** — once a stable Cerebras window opens
+   or a fresh key arrives, Qwen3-235B's instruction following should call
+   `consult_medical_expert` properly instead of describing it in text.
+2. **Use BeeAI Requirements** — RequirementAgent has a `requirements`
+   parameter that can declaratively encode "after `predict_*`, call
+   `consult_medical_expert` before `final_report`". This deterministically
+   forces the call regardless of model quality. Heavier change but
+   architecture-aligned.
+3. **Wire real medical expert sub-agent** — replace `StubMedicalExpert`
+   with a BeeAI agent + Tavily/Exa search + `enforce_citation` middleware.
+4. **Streamlit UI** — visual demo on top of the working orchestrator core.
 
 What to add next slice:
 
