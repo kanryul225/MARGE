@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
-from apps.orchestrator.tools.abstain import make_abstain
-from apps.orchestrator.tools.ask_user_back import make_ask_user_back
+from apps.orchestrator.requirements.marge_protocol import (
+    build_marge_protocol_requirement,
+)
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.final_report import make_final_report
 from apps.orchestrator.tools.patient_history import make_patient_history
@@ -64,8 +65,6 @@ def build_bundle(
         "get_patient_history": make_patient_history(source, enforcer),
         "consult_medical_expert": make_consult_expert(expert, enforcer),
         "final_report": make_final_report(enforcer),
-        "abstain": make_abstain(enforcer),
-        "ask_user_back": make_ask_user_back(enforcer),
     }
 
     return OrchestratorBundle(
@@ -111,6 +110,7 @@ async def orchestrator_agent(
             llm=llm,
             memory=UnconstrainedMemory(),
             tools=[*local_tools, *ml_tools],
+            requirements=[build_marge_protocol_requirement()],
             name="MARGE Orchestrator",
             description=(
                 "Clinical ML head researcher: orchestrates ML tools and a "

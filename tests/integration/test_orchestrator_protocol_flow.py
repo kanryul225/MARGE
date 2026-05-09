@@ -1,9 +1,11 @@
-"""Integration: end-to-end protocol flow without LLM.
+"""Integration: code-side protocol flow without LLM (single-terminal version).
 
-Simulates the orchestrator's tool-call sequence (recording each step in the
-ProtocolEnforcer) and verifies that the protocol-enforcement layer correctly
-gates final_report. This mirrors what BeeAI will do at runtime, minus the
-LLM-driven decision making.
+Simulates the orchestrator's tool-call sequence (recording each step in
+the ProtocolEnforcer) and verifies the defensive backstop blocks
+`final_report` until ML and expert have appeared in the trajectory.
+
+Order between predict_* and consult_medical_expert is intentionally
+unconstrained — both orderings pass.
 """
 
 import pytest
@@ -30,50 +32,44 @@ def deps():
     }
 
 
-def test_happy_path(deps):
-    """patient -> ML (simulated) -> expert -> final_report succeeds."""
-    patient = deps["history"](handle="seed-001")
-    assert patient.handle == "seed-001"
-
-    # ML call is simulated by directly recording it (in production this is
-    # done by the BeeAI middleware whenever any MCP tool is invoked).
-    deps["enforcer"].record("predict_breast_cancer_malignancy")
-
-    expert_response = deps["consult"](
-        question="Given the prediction, what is the recommendation?",
+def test_happy_path_ml_before_expert(deps):
+    deps["history"](handle="seed-001")
+    deps["enforcer"].record("predict_breast_cancer_malignancy")  # simulated MCP
+    deps["consult"](
+        question="What does this prediction suggest?",
         findings={"prediction": "malignant", "confidence": 0.989},
     )
-    assert expert_response.citations
+    result = deps["final"](response="High-confidence finding — refer for biopsy.")
+    assert result == {"response": "High-confidence finding — refer for biopsy."}
 
-    result = deps["final"](
-        summary="High-confidence malignancy prediction confirmed by expert review.",
-        recommendation="Refer for biopsy and imaging.",
-        confidence_note="Both ML and expert in agreement.",
-    )
-    assert result["summary"]
+
+def test_happy_path_expert_before_ml(deps):
+    """Expert can be consulted first — order is free."""
+    deps["history"](handle="seed-001")
+    deps["consult"](question="Which model should we run?", findings={})
+    deps["enforcer"].record("predict_diabetes_risk")
+    result = deps["final"](response="Risk profile suggests follow-up labs.")
+    assert "response" in result
 
 
 def test_blocked_when_skipping_ml(deps):
-    """consult expert only, then try to finalize — must fail."""
     deps["consult"](question="?", findings={})
     with pytest.raises(ProtocolViolation, match="ML model"):
-        deps["final"](summary="x", recommendation="y")
+        deps["final"](response="anything")
 
 
 def test_blocked_when_skipping_expert(deps):
-    """ML only, no expert — must fail."""
     deps["enforcer"].record("predict_diabetes_risk")
     with pytest.raises(ProtocolViolation, match="expert"):
-        deps["final"](summary="x", recommendation="y")
+        deps["final"](response="anything")
 
 
 def test_trajectory_records_full_sequence(deps):
     deps["history"](handle="seed-001")
     deps["enforcer"].record("predict_breast_cancer_malignancy")
     deps["consult"](question="?", findings={})
-    deps["final"](summary="x", recommendation="y")
+    deps["final"](response="ok")
 
-    # All tool calls are recorded for audit, including the terminal final_report.
     assert deps["enforcer"].trajectory == (
         "get_patient_history",
         "predict_breast_cancer_malignancy",

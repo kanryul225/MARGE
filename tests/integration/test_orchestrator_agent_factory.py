@@ -38,26 +38,31 @@ async def test_yields_requirement_agent():
 async def test_agent_has_local_tools_plus_ml_tools():
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        # _tools is the stable internal accessor BeeAI's runner uses.
         tool_names = {t.name for t in agent._tools}
-    expected_local = {
-        "get_patient_history",
-        "consult_medical_expert",
-        "final_report",
-        "abstain",
-        "ask_user_back",
-    }
+    expected_local = {"get_patient_history", "consult_medical_expert", "final_report"}
     expected_ml = {"predict_breast_cancer_malignancy", "predict_diabetes_risk"}
-    assert expected_local <= tool_names, f"missing local tools: {expected_local - tool_names}"
-    assert expected_ml <= tool_names, f"missing ML tools: {expected_ml - tool_names}"
+    assert expected_local <= tool_names
+    assert expected_ml <= tool_names
 
 
 @pytest.mark.asyncio
-async def test_agent_has_seven_tools_total():
+async def test_agent_has_five_tools_total():
     bundle = build_bundle()
     async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
-        # 5 local + 2 MCP-discovered ML = 7
-        assert len(agent._tools) == 7
+        # 3 local + 2 MCP-discovered ML = 5
+        assert len(agent._tools) == 5
+
+
+@pytest.mark.asyncio
+async def test_agent_has_marge_protocol_requirement():
+    from apps.orchestrator.requirements.marge_protocol import (
+        build_marge_protocol_requirement,
+    )
+
+    bundle = build_bundle()
+    async with orchestrator_agent(bundle=bundle, llm=_FakeChatModel()) as agent:
+        sources = [getattr(r, "source", None) for r in agent._requirements]
+        assert "final_report" in sources
 
 
 @pytest.mark.asyncio

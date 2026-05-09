@@ -1,8 +1,14 @@
-"""Local tool: emit the final report to the user.
+"""Local tool: emit the final response to the user.
 
-Gated by ProtocolEnforcer: fails with ProtocolViolation unless an ML
-prediction tool AND consult_medical_expert have been called in the
-trajectory. See architecture.md §2.
+The single terminal tool. The orchestrator writes a natural-language
+`response` here — covering positive recommendations, abstentions
+("cannot reliably advise — please see a doctor"), or follow-up
+questions ("please provide HbA1c, recent mammogram, family history").
+
+Gating is handled at the LLM-planning layer by `MARGEProtocolRequirement`
+in `apps/orchestrator/requirements/marge_protocol.py`. This module also
+keeps a small middleware-side check (`enforce_protocol`) as a defensive
+backstop in case any caller invokes the tool outside the agent loop.
 """
 
 from collections.abc import Callable
@@ -14,33 +20,32 @@ from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
 
 TOOL_NAME = "final_report"
 TOOL_DESCRIPTION = (
-    "Emit the final clinical report to the user. THIS IS THE ONLY PATH TO A "
-    "USER-FACING ANSWER. Fails unless at least one ML prediction tool and "
-    "consult_medical_expert have already been called in this turn."
+    "Emit the final response to the user. THIS IS THE ONLY PATH TO A USER-FACING "
+    "ANSWER. The `response` field accepts free-form natural language — use it for "
+    "the recommendation, an abstention ('I cannot give reliable guidance — please "
+    "see a doctor'), or a follow-up question ('please provide X, Y, Z'). The "
+    "orchestrator framework refuses to call this tool unless at least one ML "
+    "prediction (predict_*) and one consult_medical_expert call have already "
+    "occurred in this turn."
 )
 
 
 class ToolInput(BaseModel):
-    summary: str = Field(description="One-paragraph summary of the case and findings.")
-    recommendation: str = Field(description="Action the clinician should consider.")
-    confidence_note: str | None = Field(
-        default=None, description="Optional confidence / agreement note."
+    response: str = Field(
+        description=(
+            "Natural-language reply to the user. Covers all three response modes: "
+            "(a) clinical recommendation when ML and expert agree, "
+            "(b) explicit abstention with referral, "
+            "(c) follow-up question requesting additional information."
+        )
     )
 
 
 def make_final_report(enforcer: ProtocolEnforcer) -> Callable[..., dict[str, Any]]:
-    def final_report(
-        summary: str,
-        recommendation: str,
-        confidence_note: str | None = None,
-    ) -> dict[str, Any]:
+    def final_report(response: str) -> dict[str, Any]:
         enforcer.check_finalize()
         enforcer.record(TOOL_NAME)
-        return {
-            "summary": summary,
-            "recommendation": recommendation,
-            "confidence_note": confidence_note,
-        }
+        return {"response": response}
 
     final_report.__doc__ = TOOL_DESCRIPTION
     return final_report

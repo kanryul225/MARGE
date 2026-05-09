@@ -1,11 +1,15 @@
 """Tests for the orchestrator's local tool factories.
 
-These tools are thin wrappers that:
+Three local tools (architecture.md §2 + the single-terminal refactor):
 - consult_expert    — dispatches to the medical_expert_agent + records call
 - patient_history   — dispatches to a PatientSource + records call
-- final_report      — gated by ProtocolEnforcer.check_finalize()
-- abstain           — escape hatch, always allowed, records call
-- ask_user_back     — escape hatch, always allowed, records call
+- final_report      — only path to a user-facing answer; gated by
+                       ProtocolEnforcer.check_finalize() as the code-side
+                       defensive backstop (LLM-side gating is via
+                       MARGEProtocolRequirement).
+
+`abstain` and `ask_user_back` are deliberately not separate tools any more
+— their content is expressed in `final_report`'s `response` field.
 """
 
 import pytest
@@ -14,8 +18,6 @@ from apps.orchestrator.middleware.enforce_protocol import (
     ProtocolEnforcer,
     ProtocolViolation,
 )
-from apps.orchestrator.tools.abstain import make_abstain
-from apps.orchestrator.tools.ask_user_back import make_ask_user_back
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.final_report import make_final_report
 from apps.orchestrator.tools.patient_history import make_patient_history
@@ -65,50 +67,27 @@ class TestFinalReportTool:
         enforcer = ProtocolEnforcer()
         final = make_final_report(enforcer)
         with pytest.raises(ProtocolViolation, match="ML model"):
-            final(summary="ok", recommendation="ok")
+            final(response="anything")
 
     def test_blocks_when_no_expert_called(self):
         enforcer = ProtocolEnforcer()
         enforcer.record("predict_breast_cancer_malignancy")
         final = make_final_report(enforcer)
         with pytest.raises(ProtocolViolation, match="expert"):
-            final(summary="ok", recommendation="ok")
+            final(response="anything")
 
     def test_succeeds_when_both_called(self):
         enforcer = ProtocolEnforcer()
         enforcer.record("predict_breast_cancer_malignancy")
         enforcer.record("consult_medical_expert")
         final = make_final_report(enforcer)
-        result = final(summary="findings", recommendation="seek imaging")
-        assert result["summary"] == "findings"
-        assert result["recommendation"] == "seek imaging"
+        result = final(response="High-confidence findings — refer for biopsy.")
+        assert result == {"response": "High-confidence findings — refer for biopsy."}
 
-
-class TestAbstainTool:
-    def test_always_allowed(self):
+    def test_records_final_report_call(self):
         enforcer = ProtocolEnforcer()
-        abstain = make_abstain(enforcer)
-        result = abstain(reason="insufficient evidence")
-        assert result["abstained"] is True
-        assert result["reason"] == "insufficient evidence"
-
-    def test_records_call(self):
-        enforcer = ProtocolEnforcer()
-        abstain = make_abstain(enforcer)
-        abstain(reason="x")
-        assert enforcer.has_called("abstain")
-
-
-class TestAskUserBackTool:
-    def test_always_allowed(self):
-        enforcer = ProtocolEnforcer()
-        ask = make_ask_user_back(enforcer)
-        result = ask(missing_info=["recent labs", "family history"])
-        assert result["asking_user_back"] is True
-        assert result["missing_info"] == ["recent labs", "family history"]
-
-    def test_records_call(self):
-        enforcer = ProtocolEnforcer()
-        ask = make_ask_user_back(enforcer)
-        ask(missing_info=["x"])
-        assert enforcer.has_called("ask_user_back")
+        enforcer.record("predict_diabetes_risk")
+        enforcer.record("consult_medical_expert")
+        final = make_final_report(enforcer)
+        final(response="...")
+        assert enforcer.has_called("final_report")

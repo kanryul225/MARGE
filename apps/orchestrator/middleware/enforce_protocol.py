@@ -1,29 +1,27 @@
-"""Protocol-enforcement middleware for the orchestrator.
+"""Protocol-enforcement middleware (defense in depth).
 
-Implements the structural rule from architecture.md §2:
-- `final_report` is blocked unless at least one ML tool AND one
-  `consult_medical_expert` call appear in the trajectory.
-- `abstain` and `ask_user_back` are escape hatches and may be called
-  without these prerequisites.
+Architecture.md §2's structural rule is enforced two ways:
 
-This is the orchestrator's structural guarantee that it will never produce
-medical advice without first consulting an ML model and the medical expert.
-The rule lives in code, not in a system prompt — it cannot be jailbroken.
+- LLM-side (primary): `MARGEProtocolRequirement` keeps `final_report`
+  disallowed in BeeAI's tool listing until ML and expert have been
+  consulted. The agent literally cannot pick the tool too early.
+- Code-side (this file, defensive): if `final_report` is somehow invoked
+  outside the agent loop, `check_finalize()` still raises.
 
-Wired into BeeAI as a per-tool-call hook: every tool invocation passes
-through `record(name)`; the gated tools call `check_finalize()` before
-producing output.
+`final_report` is now the only terminal tool. Abstention and follow-up
+questions are expressed as natural-language `response` text inside
+`final_report`, not as separate tools.
 """
 
 from collections.abc import Iterable
 
 
 class ProtocolViolation(Exception):
-    """Raised when a tool is called in violation of the orchestration protocol."""
+    """Raised when `final_report` is invoked without preconditions."""
 
 
 class ProtocolEnforcer:
-    """Tracks tool calls and gates terminal tools by precondition checks."""
+    """Tracks tool calls and gates `final_report` by precondition check."""
 
     def __init__(
         self,
@@ -65,9 +63,3 @@ class ProtocolEnforcer:
                 "Cannot call final_report: medical expert has not been consulted. "
                 "Call consult_medical_expert with the ML findings before finalising."
             )
-
-    def check_can_abstain(self) -> None:
-        return  # always allowed
-
-    def check_can_ask_user_back(self) -> None:
-        return  # always allowed

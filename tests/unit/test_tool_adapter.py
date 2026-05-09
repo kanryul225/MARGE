@@ -42,10 +42,10 @@ class TestToBeeaiTool:
 
 
 class TestLocalToolsAsBeeai:
-    def test_returns_five_tools(self):
+    def test_returns_three_tools(self):
         bundle = build_bundle()
         tools = local_tools_as_beeai(bundle)
-        assert len(tools) == 5
+        assert len(tools) == 3
 
     def test_tool_names_match_expected_set(self):
         bundle = build_bundle()
@@ -55,8 +55,6 @@ class TestLocalToolsAsBeeai:
             "get_patient_history",
             "consult_medical_expert",
             "final_report",
-            "abstain",
-            "ask_user_back",
         }
 
     def test_calling_get_patient_history_records_in_bundle_enforcer(self):

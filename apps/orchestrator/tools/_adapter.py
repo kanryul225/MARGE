@@ -23,8 +23,6 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from apps.orchestrator.tools import (
-    abstain as _ab,
-    ask_user_back as _au,
     consult_expert as _ce,
     final_report as _fr,
     patient_history as _ph,
@@ -37,7 +35,7 @@ if TYPE_CHECKING:
 
 
 # Order is the order the LLM will see them in tool listings.
-LOCAL_TOOL_MODULES: tuple[ModuleType, ...] = (_ph, _ce, _fr, _ab, _au)
+LOCAL_TOOL_MODULES: tuple[ModuleType, ...] = (_ph, _ce, _fr)
 
 
 def _to_tool_output(result: Any) -> Any:

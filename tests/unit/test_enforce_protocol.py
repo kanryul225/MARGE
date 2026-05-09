@@ -1,9 +1,10 @@
-"""Unit tests for ProtocolEnforcer middleware.
+"""Unit tests for the ProtocolEnforcer code-side defensive backstop.
 
-Architecture.md §2: 'Orchestrator SHOULD NOT make an arbitrary medical
-decision' is enforced by blocking final_report unless ML + medical expert
-have been called in the trajectory. abstain and ask_user_back are escape
-hatches that may be called without these prerequisites.
+Architecture.md §2's main enforcement is now LLM-side via
+`MARGEProtocolRequirement`. This middleware is the defensive backstop
+that raises if `final_report` is invoked without the trajectory ever
+recording an ML and expert call (e.g., from a test that bypasses the
+agent loop).
 """
 
 import pytest
@@ -59,16 +60,6 @@ class TestFinalizeGate:
         enforcer.record("predict_diabetes_risk")
         enforcer.record("consult_medical_expert")
         enforcer.check_finalize()
-
-
-class TestEscapeHatches:
-    def test_abstain_allowed_without_prerequisites(self):
-        enforcer = ProtocolEnforcer()
-        enforcer.check_can_abstain()  # no raise
-
-    def test_ask_user_back_allowed_without_prerequisites(self):
-        enforcer = ProtocolEnforcer()
-        enforcer.check_can_ask_user_back()  # no raise
 
 
 class TestConfigurability:
