@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 # Load .env BEFORE importing modules that read env vars at import time.
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
-from apps.orchestrator.agent import build_bundle, build_orchestrator_agent
+from apps.orchestrator.agent import build_bundle, orchestrator_agent
 from packages.llm_provider.client import build_chat_model_for_role
 from packages.llm_provider.settings import Role, RoleConfig
 
@@ -54,10 +54,10 @@ async def main() -> None:
 
     llm = build_chat_model_for_role(Role.ORCHESTRATOR)
     bundle = build_bundle()
-    agent = await build_orchestrator_agent(bundle=bundle, llm=llm)
 
     print("\nRunning agent...\n" + "-" * 72)
-    result = await agent.run(_PROMPT)
+    async with orchestrator_agent(bundle=bundle, llm=llm) as agent:
+        result = await agent.run(_PROMPT)
 
     print("\n" + "=" * 72)
     print(" Result")

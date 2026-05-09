@@ -6,18 +6,24 @@ Two layers:
 local tools, system prompt — exactly as architecture.md §4 specifies. This
 is what every test reaches for; it has no LLM dependency.
 
-`build_orchestrator_agent(bundle, llm)` wraps the bundle into a fully
-configured BeeAI `ToolCallingAgent`: local tools converted to BeeAI Tools,
-ML tools auto-discovered from the in-process `ml-models` MCP server, system
-prompt mounted on the agent's metadata, memory attached. The LLM is passed
-in by the caller so tests can inject a fake one.
+`orchestrator_agent(bundle, llm)` is an async context manager that:
+- Opens an in-process MCP Client against the `ml-models` server
+- Discovers ML tools via the live session
+- Wraps local tools with the BeeAI adapter
+- Yields a fully wired `RequirementAgent` (5 local + N MCP tools)
+- Closes the MCP session on exit
 
-Real-LLM smoke verification lives in `scripts/orchestrator_smoke.py`.
+The session must stay open for the lifetime of the agent run — `MCPTool`
+holds a reference to the session and tearing it down before agent.run()
+makes every tool call fail with `ToolError`.
+
+Real-LLM smoke verification: `scripts/orchestrator_smoke.py`.
 """
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 from apps.orchestrator.middleware.enforce_protocol import ProtocolEnforcer
 from apps.orchestrator.tools.abstain import make_abstain
@@ -30,7 +36,7 @@ from services.patient_data_mcp_server.sources._base import PatientSource
 from services.patient_data_mcp_server.sources.sqlite_db import SqlitePatientSource
 
 if TYPE_CHECKING:
-    from beeai_framework.agents.tool_calling import ToolCallingAgent
+    from beeai_framework.agents.requirement import RequirementAgent
     from beeai_framework.backend.chat import ChatModel
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
@@ -70,38 +76,46 @@ def build_bundle(
     )
 
 
-async def build_orchestrator_agent(
+@asynccontextmanager
+async def orchestrator_agent(
     bundle: OrchestratorBundle,
     llm: "ChatModel",
-) -> "RequirementAgent":
-    """Assemble a fully wired BeeAI RequirementAgent.
+) -> AsyncIterator["RequirementAgent"]:
+    """Build and yield a fully wired RequirementAgent; close MCP session on exit.
 
-    - Local tools are converted from the bundle's factory closures
-    - ML tools are auto-discovered from the in-process `ml-models` MCP server
-    - The system prompt is the agent's `instructions`
-    - Memory is `UnconstrainedMemory` (single-user, single-session demo)
+    Why this is a context manager: BeeAI's MCPTool holds a reference to the
+    MCP ClientSession. If we close the session before the agent finishes,
+    every MCP tool call inside agent.run() raises ToolError. Keeping the
+    session open for the agent's lifetime is the simplest correct fix.
 
-    Future work: declare the protocol invariants (ML+expert before final_report)
-    as BeeAI `Requirement`s rather than enforcing them inside the tool body —
-    that lifts the constraint into the agent loop's planning surface.
+    Usage:
+        async with orchestrator_agent(bundle, llm) as agent:
+            result = await agent.run("…")
     """
     from beeai_framework.agents.requirement import RequirementAgent
     from beeai_framework.memory import UnconstrainedMemory
+    from fastmcp import Client
 
-    from apps.orchestrator.mcp_discovery import discover_ml_mcp_tools
     from apps.orchestrator.tools._adapter import local_tools_as_beeai
+    from services.ml_mcp_server.server import build_server
 
     local_tools = local_tools_as_beeai(bundle)
-    ml_tools = await discover_ml_mcp_tools()
+    mcp_server = build_server()
 
-    return RequirementAgent(
-        llm=llm,
-        memory=UnconstrainedMemory(),
-        tools=[*local_tools, *ml_tools],
-        name="MARGE Orchestrator",
-        description=(
-            "Clinical ML head researcher: orchestrates ML tools and a medical "
-            "expert sub-agent."
-        ),
-        instructions=bundle.system_prompt,
-    )
+    async with Client(mcp_server) as mcp_client:
+        from beeai_framework.tools.mcp import MCPTool
+
+        ml_tools = await MCPTool.from_client(mcp_client.session)
+
+        agent = RequirementAgent(
+            llm=llm,
+            memory=UnconstrainedMemory(),
+            tools=[*local_tools, *ml_tools],
+            name="MARGE Orchestrator",
+            description=(
+                "Clinical ML head researcher: orchestrates ML tools and a "
+                "medical expert sub-agent."
+            ),
+            instructions=bundle.system_prompt,
+        )
+        yield agent
