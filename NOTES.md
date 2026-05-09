@@ -4,29 +4,52 @@ Operational notes that don't belong in `architecture.md` or `README.md`.
 
 ## Live-LLM verification status (May 2026)
 
+### Provider-specific gotchas (root-caused via raw HTTP capture)
+
+After capturing the actual request bodies BeeAI sends and replaying them with
+`curl`, three OpenAI-compat-incompatibility issues surfaced. All are now fixed
+in `packages/llm_provider/client._build_openai_compat`:
+
+1. **`response_format=json_schema` instead of `tools`**.
+   BeeAI's `RequirementAgent` defaults to `tool_call_fallback_via_response_format=True`,
+   which packs every tool into one `anyOf` JSON-Schema and asks the model to
+   produce structured output. NVIDIA NIM (and Cerebras) do not handle the
+   nested `anyOf` reliably — requests hang or return malformed output.
+   **Fix**: pass `tool_call_fallback_via_response_format=False` so BeeAI
+   sends native OpenAI `tools=[...]`.
+
+2. **`tool_choice="required"` not supported**.
+   Cerebras / NVIDIA NIM / Chutes do not honour `tool_choice={"required"}`.
+   When BeeAI receives plain text from a model it told to "must call a tool",
+   it raises `ToolChoiceError`.
+   **Fix**: pass `tool_choice_support={"auto","single","none"}` so BeeAI
+   never asks for `required`.
+
+3. **NVIDIA NIM 397B serving capacity**.
+   `qwen/qwen3.5-397b-a17b` on free NIM credits is currently throttled
+   to the point that even single short prompts time out. The same key
+   gets sub-second responses from `qwen/qwen3-next-80b-a3b-instruct`,
+   so `_DEFAULT_NVIDIA_MODEL` now points at the 80B variant. Override
+   with `NVIDIA_MODEL_ID=qwen/qwen3.5-397b-a17b` once NIM stabilises.
+
+### Status after fixes
+
 What works (verified):
 
 - All 5 providers register and `build_chat_model()` returns the right adapter.
-- Direct `ChatModel.run([UserMessage(...)])` succeeds against:
-  - **NVIDIA NIM** (`qwen/qwen3.5-397b-a17b`)
-  - **Cerebras** (`qwen-3-235b-a22b-instruct-2507`)
-- A single agent iteration (`agent.requirement.start → success`) completes:
-  - Cerebras: ~1.1s per iteration
-  - NVIDIA NIM: ~8.8s per iteration
+- Direct `ChatModel.run([UserMessage(...)])` succeeds for Cerebras and
+  NVIDIA NIM (80B variant) and the request body now uses native `tools`.
 - The 7-tool surface (5 local + 2 ML MCP) registers correctly on the agent.
+
+What's still under verification:
+
+- **Full multi-iteration loop** against the live providers — being
+  re-tested with the three fixes above. Cerebras's 30 RPM still requires
+  a small inter-call gap; throttle/retry layer is the next slice if the
+  bare loop hits 429 before reaching `final_report`.
 
 What doesn't yet work (deferred):
 
-- **Multi-iteration agent loop** against free-tier providers stalls. Two
-  distinct failure modes observed:
-  - **Cerebras**: 429 `request_quota_exceeded` after the second LLM call.
-    The 30 RPM limit is enforced strictly; back-to-back calls in <2s burst
-    hit it.
-  - **NVIDIA NIM**: the second iteration's request hangs indefinitely
-    (no response after 5+ minutes, only ~5s of CPU). Direct multi-call
-    sequences and direct tool-call requests both work fine, so the hang
-    is likely specific to how BeeAI sends the tool-result follow-up
-    (or a per-key concurrency cap on NIM serverless).
 - **Chutes**: marketed as free, but the API returns
   `402 Quota exceeded and account balance is $0.0`. Configured but unusable
   until the account has TAO/credits.

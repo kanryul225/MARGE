@@ -34,7 +34,11 @@ _DEFAULT_WATSONX_MODEL = "ibm/granite-3-8b-instruct"
 _DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
 _DEFAULT_CEREBRAS_URL = "https://api.cerebras.ai/v1"
 
-_DEFAULT_NVIDIA_MODEL = "qwen/qwen3.5-397b-a17b"
+# NOTE: NVIDIA NIM's hosted Qwen3.5-397B is currently capacity-throttled —
+# even single short prompts time out. The 80B "next" variant is responsive
+# (0.5s round trip) and supports tool calling. Override with
+# NVIDIA_MODEL_ID=qwen/qwen3.5-397b-a17b once NIM stabilises.
+_DEFAULT_NVIDIA_MODEL = "qwen/qwen3-next-80b-a3b-instruct"
 _DEFAULT_NVIDIA_URL = "https://integrate.api.nvidia.com/v1"
 
 _DEFAULT_CHUTES_MODEL = "moonshotai/Kimi-K2.5-TEE"

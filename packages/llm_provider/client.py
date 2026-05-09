@@ -60,7 +60,22 @@ def _build_openai_compat(s: LLMSettings, key_var: str) -> "ChatModel":
         raise ValueError(f"{key_var} is required when LLM_PROVIDER={s.provider.value}.")
     from beeai_framework.adapters.openai.backend.chat import OpenAIChatModel
 
-    return OpenAIChatModel(model_id=s.model_id, api_key=s.api_key, base_url=s.base_url)
+    # NOTE 1: tool_call_fallback_via_response_format=False forces BeeAI to
+    # send native OpenAI `tools` instead of a `response_format=json_schema`
+    # anyOf-over-all-tools. The fallback path is unsupported by most
+    # OpenAI-compat free-tier endpoints.
+    #
+    # NOTE 2: tool_choice_support omits "required" — Cerebras, NVIDIA NIM,
+    # and Chutes do not honour `tool_choice={"required"}`; BeeAI's default
+    # raises if it asks for a tool call and the model returns plain text.
+    # Restricting to {"auto","single","none"} lets BeeAI plan around it.
+    return OpenAIChatModel(
+        model_id=s.model_id,
+        api_key=s.api_key,
+        base_url=s.base_url,
+        tool_call_fallback_via_response_format=False,
+        tool_choice_support={"auto", "single", "none"},
+    )
 
 
 def _build_cerebras(s: LLMSettings) -> "ChatModel":
