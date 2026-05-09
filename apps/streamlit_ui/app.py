@@ -214,25 +214,31 @@ def _role_label(role: Role) -> str:
 
 async def _run_analysis(
     user_message: str,
-    patient_handle: str,
+    patient_handle: str | None,
     db_path: Path,
 ) -> tuple[str, list[str]]:
-    prompt = (
-        f"Current patient handle: `{patient_handle}`. "
-        "If the user's message contains new clinical values (glucose, BMI, blood pressure, "
-        "age, insulin, pregnancy count, family history score, etc.), call `update_patient` "
-        "to persist them before running the ML tools. "
-        f"User message: {user_message}"
-    )
+    if patient_handle:
+        prompt = (
+            f"Current patient handle: `{patient_handle}`. "
+            "If the user's message contains new clinical values (glucose, BMI, blood pressure, "
+            "age, insulin, pregnancy count, family history score, etc.), call `update_patient` "
+            "to persist them before running the ML tools. "
+            f"User message: {user_message}"
+        )
+        patient_db_path: Path | None = db_path
+    else:
+        prompt = user_message
+        patient_db_path = None
+
     llm = build_chat_model_for_role(Role.ORCHESTRATOR)
     bundle = build_bundle()
-    async with orchestrator_agent(bundle=bundle, llm=llm, patient_db_path=db_path) as agent:
+    async with orchestrator_agent(bundle=bundle, llm=llm, patient_db_path=patient_db_path) as agent:
         result = await agent.run(prompt)
     return _result_text(result), list(bundle.enforcer.trajectory)
 
 
 def run_analysis(
-    user_message: str, patient_handle: str, db_path: Path
+    user_message: str, patient_handle: str | None, db_path: Path
 ) -> tuple[str, list[str]]:
     return asyncio.run(_run_analysis(user_message, patient_handle, db_path))
 
@@ -315,7 +321,7 @@ def _app_main() -> None:
             else:
                 st.markdown(message["content"])
 
-    user_input = st.chat_input("Message", disabled=no_patients)
+    user_input = st.chat_input("Message")
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input, "trajectory": []})
         with st.chat_message("user"):
