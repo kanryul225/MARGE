@@ -44,6 +44,16 @@ class TestRequestMoreInfoSchema:
         assert obj.needed[0].name == "HbA1c"
         assert obj.needed[0].field_type == "text"  # default
 
+    def test_accepts_catalog_check_fields(self):
+        obj = rmi_mod.ToolInput(
+            target_condition="diabetes",
+            known_features={"glucose": 148, "BMI": 33.6},
+            rationale="Check whether a local model can run.",
+        )
+        assert obj.target_condition == "diabetes"
+        assert obj.known_features["glucose"] == 148
+        assert obj.needed == []
+
     def test_rejects_missing_rationale(self):
         with pytest.raises(ValidationError):
             rmi_mod.ToolInput(needed=[])

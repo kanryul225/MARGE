@@ -149,6 +149,56 @@ class TestResultText:
 
         assert _result_text(FakeResult()) == "structured response"
 
+    def test_restores_visible_final_answer_prefix(self):
+        class Structured:
+            response = "녕하세요"
+
+        class ToolCall:
+            tool_name = "final_answer"
+
+        class Message:
+            text = "안"
+
+            def get_tool_calls(self):
+                return [ToolCall()]
+
+        class Memory:
+            messages = [Message()]
+
+        class State:
+            memory = Memory()
+
+        class FakeResult:
+            output_structured = Structured()
+            state = State()
+
+        assert _result_text(FakeResult()) == "안녕하세요"
+
+    def test_does_not_duplicate_visible_final_answer_prefix(self):
+        class Structured:
+            response = "안녕하세요"
+
+        class ToolCall:
+            tool_name = "final_answer"
+
+        class Message:
+            text = "안"
+
+            def get_tool_calls(self):
+                return [ToolCall()]
+
+        class Memory:
+            messages = [Message()]
+
+        class State:
+            memory = Memory()
+
+        class FakeResult:
+            output_structured = Structured()
+            state = State()
+
+        assert _result_text(FakeResult()) == "안녕하세요"
+
     def test_falls_back_to_answer_text(self):
         class Answer:
             text = "answer text"

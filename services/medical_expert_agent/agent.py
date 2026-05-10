@@ -17,6 +17,7 @@ the orchestrator's ML predictors and never recommends "use model X" — see
 """
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -84,13 +85,24 @@ class MedicalExpertAgent:
             response = await expert.consult("...", {...})
     """
 
-    def __init__(self, llm: "ChatModel", system_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        llm: "ChatModel",
+        system_prompt: str | None = None,
+        *,
+        web_search: Callable[[str, int], list[RetrievedDocument]] | None = None,
+        enable_web_search: bool = True,
+        max_web_results: int = 3,
+    ) -> None:
         from beeai_framework.memory import UnconstrainedMemory
 
         self._llm = llm
         self._system_prompt = system_prompt or _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
         self._memory = UnconstrainedMemory()
         self._event_sink: Callable[[dict[str, Any]], None] | None = None
+        self._web_search = web_search
+        self._enable_web_search = enable_web_search
+        self._max_web_results = max_web_results
 
     @classmethod
     def from_env(cls) -> "MedicalExpertAgent":
@@ -125,6 +137,42 @@ class MedicalExpertAgent:
         except Exception:
             body = str(findings)
         return f"\n\nClinical context:\n```json\n{body}\n```"
+
+    @staticmethod
+    def _fallback_citations(documents: list[RetrievedDocument]) -> list[Citation]:
+        if documents:
+            return [
+                Citation(document=doc, supporting_quote=doc.snippet or None)
+                for doc in documents
+            ]
+        return [Citation(document=_STUB_DOC, supporting_quote=None)]
+
+    @staticmethod
+    def _parse_response_text(
+        text: str,
+        fallback_citations: list[Citation],
+    ) -> MedicalExpertResponse:
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return MedicalExpertResponse(
+                reasoning=text,
+                citations=fallback_citations,
+            )
+
+        citations: list[Citation] = []
+        for raw in payload.get("citations") or []:
+            try:
+                citations.append(Citation.model_validate(raw))
+            except Exception:
+                continue
+
+        return MedicalExpertResponse(
+            reasoning=payload.get("reasoning") or text,
+            citations=citations or fallback_citations,
+            abstained=bool(payload.get("abstained", False)),
+            abstain_reason=payload.get("abstain_reason"),
+        )
 
     @staticmethod
     def _result_text(result: Any) -> str:
@@ -247,9 +295,48 @@ class MedicalExpertAgent:
             except Exception:
                 pass
 
+    async def _consult_direct(
+        self,
+        question: str,
+        findings: dict[str, Any],
+    ) -> MedicalExpertResponse:
+        """Compatibility path for simple LLM-only tests and injected RAG."""
+
+        from beeai_framework.backend.message import SystemMessage, UserMessage
+
+        user_msg = f"{question}{self._format_findings(findings)}"
+        retrieved_docs: list[RetrievedDocument] = []
+        if self._enable_web_search and self._web_search is not None:
+            retrieved_docs = self._web_search(question, self._max_web_results)
+            if retrieved_docs:
+                context = [
+                    doc.model_dump(mode="json")
+                    for doc in retrieved_docs
+                ]
+                user_msg += (
+                    "\n\nretrieved_context:\n```json\n"
+                    f"{json.dumps(context, indent=2, ensure_ascii=False)}"
+                    "\n```"
+                )
+
+        messages = [SystemMessage(self._system_prompt), UserMessage(user_msg)]
+        result = await self._llm.run(messages)
+        text = (
+            result.get_text_content()
+            if hasattr(result, "get_text_content")
+            else str(result)
+        ) or ""
+        return self._parse_response_text(
+            text,
+            fallback_citations=self._fallback_citations(retrieved_docs),
+        )
+
     async def consult(
         self, question: str, findings: dict[str, Any]
     ) -> MedicalExpertResponse:
+        if self._web_search is not None or not self._enable_web_search:
+            return await self._consult_direct(question, findings)
+
         from beeai_framework.agents.requirement import RequirementAgent
 
         user_msg = f"{question}{self._format_findings(findings)}"
@@ -278,3 +365,11 @@ class MedicalExpertAgent:
             reasoning=self._result_text(result),
             citations=citations,
         )
+
+
+def build_medical_expert_agent() -> StubMedicalExpert | MedicalExpertAgent:
+    """Build the configured expert, or a stub when no expert env is set."""
+
+    if not os.getenv("MEDICAL_EXPERT_PRIMARY") and not os.getenv("LLM_PROVIDER"):
+        return StubMedicalExpert()
+    return MedicalExpertAgent.from_env()

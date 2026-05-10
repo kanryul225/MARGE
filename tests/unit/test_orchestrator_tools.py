@@ -52,6 +52,32 @@ class TestRequestMoreInfoTool:
         assert out["needed"][0]["name"] == "HbA1c"
         assert out["rationale"] == "Refines diabetes risk"
 
+    def test_checks_catalog_and_missing_model_features(self):
+        enforcer = ProtocolEnforcer()
+        ask = make_request_more_info(enforcer)
+        out = ask(
+            target_condition="diabetes",
+            known_features={"glucose": 148, "bmi": 33.6, "age": 50},
+            rationale="Check local diabetes model inputs.",
+        )
+        assert out["catalog_checked"] is True
+        assert out["model_available"] is True
+        assert out["matched_models"][0]["model"] == "predict_diabetes_risk"
+        needed_names = {item["name"] for item in out["needed"]}
+        assert "plas" not in needed_names
+        assert "mass" not in needed_names
+        assert "age" not in needed_names
+        assert {"preg", "pres", "skin", "insu", "pedi"} <= needed_names
+
+    def test_catalog_reports_no_matching_model(self):
+        enforcer = ProtocolEnforcer()
+        ask = make_request_more_info(enforcer)
+        out = ask(target_condition="ankle sprain", rationale="Check model availability.")
+        assert out["catalog_checked"] is True
+        assert out["model_available"] is False
+        assert out["needed"] == []
+        assert out["available_models"]
+
     def test_records_call(self):
         enforcer = ProtocolEnforcer()
         ask = make_request_more_info(enforcer)
