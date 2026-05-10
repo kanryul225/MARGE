@@ -198,10 +198,29 @@ def render_abstain_card(payload: dict) -> None:
 def render_request_more_info_card(payload: dict) -> None:
     rationale = payload.get("rationale", "")
     needed = payload.get("needed") or []
-    st.info(f"**Need more info**\n\n{rationale}")
+    target = payload.get("target_condition")
+    model_available = payload.get("model_available")
+    matched_models = payload.get("matched_models") or []
+
+    title = "**Need more info**"
+    if payload.get("catalog_checked"):
+        if model_available:
+            models = ", ".join(m.get("model", "?") for m in matched_models)
+            title = f"**Local ML model found**\n\n`{models}`"
+        else:
+            title = "**No matching local ML model**"
+
+    st.info(f"{title}\n\n{rationale}")
+    if target:
+        st.caption(f"Target condition: `{target}`")
+    if matched_models:
+        for model in matched_models:
+            missing_count = len(model.get("missing_features") or [])
+            status = "ready to run" if model.get("can_run_now") else f"{missing_count} missing feature(s)"
+            st.markdown(f"- `{model.get('model')}` — {status}")
     if needed:
         rows = "\n".join(
-            f"- **{n.get('name')}** ({n.get('field_type','text')}"
+            f"- **{n.get('label') or n.get('name')}** / `{n.get('name')}` ({n.get('field_type','text')}"
             f"{', ' + n.get('unit') if n.get('unit') else ''}): {n.get('why','')}"
             for n in needed
         )
@@ -223,14 +242,16 @@ def _terminal_payload_from_events(events: list[dict]) -> tuple[str | None, dict 
             and e.get("agent", "orchestrator") == "orchestrator"
         ):
             # The structured payload may live on either tool_call or tool_output.
+            for f in reversed(events):
+                if (f.get("kind") == "tool_output" and f.get("name") == e["name"]
+                        and f.get("agent", "orchestrator") == "orchestrator"):
+                    if f.get("output"):
+                        return e["name"], f["output"]
+                    if f.get("input"):
+                        return e["name"], f["input"]
             inp = e.get("input")
             if inp:
                 return e["name"], inp
-            # Fall back to the matching tool_output (which carries input)
-            for f in reversed(events):
-                if (f.get("kind") == "tool_output" and f.get("name") == e["name"]
-                        and f.get("input")):
-                    return e["name"], f["input"]
             return e["name"], None
     return None, None
 
@@ -337,15 +358,63 @@ def _append_chat_log(
 # Orchestrator runner
 # ---------------------------------------------------------------------------
 
+def _tool_call_names_from_message(message: Any) -> list[str]:
+    names: list[str] = []
+    if hasattr(message, "get_tool_calls"):
+        try:
+            names.extend(
+                str(getattr(call, "tool_name", ""))
+                for call in message.get_tool_calls()
+                if getattr(call, "tool_name", "")
+            )
+        except Exception:
+            pass
+
+    for content in getattr(message, "content", []) or []:
+        if isinstance(content, dict):
+            name = content.get("tool_name") or content.get("name")
+        else:
+            name = getattr(content, "tool_name", None) or getattr(content, "name", None)
+        if name:
+            names.append(str(name))
+    return names
+
+
+def _final_answer_visible_prefix(result: Any) -> str:
+    """Return assistant text emitted beside the final_answer tool call, if any.
+
+    Some OpenAI-compatible providers split the first visible characters into
+    assistant content while the rest of the final answer lands in the
+    `final_answer` tool arguments. BeeAI stores only the tool argument as the
+    structured response, so recover that visible prefix before displaying/logging.
+    """
+    state = getattr(result, "state", None)
+    memory = getattr(state, "memory", None)
+    messages = getattr(memory, "messages", None) or []
+    for message in reversed(messages):
+        if "final_answer" not in _tool_call_names_from_message(message):
+            continue
+        text = getattr(message, "text", "") or ""
+        return text if isinstance(text, str) else str(text)
+    return ""
+
+
+def _with_visible_final_answer_prefix(result: Any, text: str) -> str:
+    prefix = _final_answer_visible_prefix(result)
+    if not prefix or text.startswith(prefix):
+        return text
+    return f"{prefix}{text}"
+
+
 def _result_text(result: Any) -> str:
     structured = getattr(result, "output_structured", None)
     text = getattr(structured, "response", None)
     if text:
-        return _strip_transport_sentinel(text)
+        return _strip_transport_sentinel(_with_visible_final_answer_prefix(result, text))
     answer = getattr(result, "answer", None)
     text = getattr(answer, "text", None)
     if text:
-        return _strip_transport_sentinel(text)
+        return _strip_transport_sentinel(_with_visible_final_answer_prefix(result, text))
     return _strip_transport_sentinel(str(result))
 
 
@@ -713,8 +782,31 @@ def stream_analysis(
         return repr(obj)[:500]
 
     def _generator():
+        stream_timeout_seconds = 300
+        final_already_rendered = False
         while True:
-            item = eq.get(timeout=300)
+            try:
+                item = eq.get(timeout=stream_timeout_seconds)
+            except _queue.Empty:
+                timeout_message = (
+                    "No response event arrived from the agent for "
+                    f"{stream_timeout_seconds} seconds. The run is likely stuck "
+                    "inside a long LLM/provider/tool call."
+                )
+                timeout_event = {
+                    "kind": "tool_output",
+                    "agent": "ui",
+                    "name": "stream_analysis",
+                    "success": False,
+                    "error": timeout_message,
+                }
+                events.append(timeout_event)
+                _log("stream_timeout", timeout_event)
+                state["error"] = f"TimeoutError: {timeout_message}"
+                state["response"] = f"Run timed out:\n```\n{state['error']}\n```"
+                final_already_rendered = True
+                yield f"\n\n{state['response']}\n\n"
+                break
             if item is None:
                 break
             kind, payload = item
@@ -754,7 +846,7 @@ def stream_analysis(
                     err = event.get("error", "(unknown)")
                     yield f"\n\n  ❌ **{event.get('name')} failed:** `{err}`\n\n"
         final = state.get("response") or ""
-        if final:
+        if final and not final_already_rendered:
             yield final
 
     return _generator()

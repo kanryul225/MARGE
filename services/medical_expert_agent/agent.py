@@ -17,6 +17,7 @@ the orchestrator's ML predictors and never recommends "use model X" — see
 """
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -84,21 +85,40 @@ class MedicalExpertAgent:
             response = await expert.consult("...", {...})
     """
 
-    def __init__(self, llm: "ChatModel", system_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        llm: "ChatModel",
+        system_prompt: str | None = None,
+        *,
+        web_search: Callable[[str, int], list[RetrievedDocument]] | None = None,
+        enable_web_search: bool = True,
+        max_web_results: int = 3,
+        max_web_search_calls_per_turn: int = 1,
+    ) -> None:
         from beeai_framework.memory import UnconstrainedMemory
 
         self._llm = llm
         self._system_prompt = system_prompt or _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
         self._memory = UnconstrainedMemory()
         self._event_sink: Callable[[dict[str, Any]], None] | None = None
+        self._web_search = web_search
+        self._enable_web_search = enable_web_search
+        self._max_web_results = max_web_results
+        self._max_web_search_calls_per_turn = max(0, max_web_search_calls_per_turn)
+        self._web_search_calls_this_turn = 0
+        self._turn_limit_active = False
 
     @classmethod
     def from_env(cls) -> "MedicalExpertAgent":
         """Build with the LLM configured for `Role.MEDICAL_EXPERT` in .env."""
         from packages.llm_provider.client import build_chat_model_for_role
         from packages.llm_provider.settings import Role
+        from services.medical_expert_agent.tools.search_web import medical_web_max_results
 
-        return cls(llm=build_chat_model_for_role(Role.MEDICAL_EXPERT))
+        return cls(
+            llm=build_chat_model_for_role(Role.MEDICAL_EXPERT),
+            max_web_results=medical_web_max_results(),
+        )
 
     @property
     def llm(self) -> "ChatModel":
@@ -110,6 +130,9 @@ class MedicalExpertAgent:
         """Attach a per-turn trace sink for expert-internal events."""
 
         self._event_sink = sink
+        self._turn_limit_active = sink is not None
+        if sink is not None:
+            self._web_search_calls_this_turn = 0
 
     def _emit_event(self, event: dict[str, Any]) -> None:
         if self._event_sink is None:
@@ -125,6 +148,42 @@ class MedicalExpertAgent:
         except Exception:
             body = str(findings)
         return f"\n\nClinical context:\n```json\n{body}\n```"
+
+    @staticmethod
+    def _fallback_citations(documents: list[RetrievedDocument]) -> list[Citation]:
+        if documents:
+            return [
+                Citation(document=doc, supporting_quote=doc.snippet or None)
+                for doc in documents
+            ]
+        return [Citation(document=_STUB_DOC, supporting_quote=None)]
+
+    @staticmethod
+    def _parse_response_text(
+        text: str,
+        fallback_citations: list[Citation],
+    ) -> MedicalExpertResponse:
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return MedicalExpertResponse(
+                reasoning=text,
+                citations=fallback_citations,
+            )
+
+        citations: list[Citation] = []
+        for raw in payload.get("citations") or []:
+            try:
+                citations.append(Citation.model_validate(raw))
+            except Exception:
+                continue
+
+        return MedicalExpertResponse(
+            reasoning=payload.get("reasoning") or text,
+            citations=citations or fallback_citations,
+            abstained=bool(payload.get("abstained", False)),
+            abstain_reason=payload.get("abstain_reason"),
+        )
 
     @staticmethod
     def _result_text(result: Any) -> str:
@@ -179,6 +238,39 @@ class MedicalExpertAgent:
                 continue
             citations.append(Citation(document=doc, supporting_quote=doc.snippet or None))
         return citations
+
+    async def _search_medical_web_once_per_turn(
+        self,
+        query: str,
+        max_results: int = 3,
+    ) -> dict[str, Any]:
+        from services.medical_expert_agent.tools.search_web import (
+            _medical_web_include_domains,
+            search_medical_web,
+        )
+
+        if self._web_search_calls_this_turn >= self._max_web_search_calls_per_turn:
+            return {
+                "query": query,
+                "max_results": 0,
+                "include_domains": _medical_web_include_domains(),
+                "documents": [],
+                "warning": (
+                    "search_medical_web is limited to one actual web search per "
+                    "user turn; this additional query was not executed."
+                ),
+                "skipped_due_to_turn_limit": True,
+                "calls_used_this_turn": self._web_search_calls_this_turn,
+                "max_calls_per_turn": self._max_web_search_calls_per_turn,
+            }
+
+        self._web_search_calls_this_turn += 1
+        result = await search_medical_web(query=query, max_results=max_results)
+        if isinstance(result, dict):
+            result.setdefault("skipped_due_to_turn_limit", False)
+            result["calls_used_this_turn"] = self._web_search_calls_this_turn
+            result["max_calls_per_turn"] = self._max_web_search_calls_per_turn
+        return result
 
     def _wire_tool_logging(
         self,
@@ -247,18 +339,61 @@ class MedicalExpertAgent:
             except Exception:
                 pass
 
+    async def _consult_direct(
+        self,
+        question: str,
+        findings: dict[str, Any],
+    ) -> MedicalExpertResponse:
+        """Compatibility path for simple LLM-only tests and injected RAG."""
+
+        from beeai_framework.backend.message import SystemMessage, UserMessage
+
+        user_msg = f"{question}{self._format_findings(findings)}"
+        retrieved_docs: list[RetrievedDocument] = []
+        if self._enable_web_search and self._web_search is not None:
+            retrieved_docs = self._web_search(question, self._max_web_results)
+            if retrieved_docs:
+                context = [
+                    doc.model_dump(mode="json")
+                    for doc in retrieved_docs
+                ]
+                user_msg += (
+                    "\n\nretrieved_context:\n```json\n"
+                    f"{json.dumps(context, indent=2, ensure_ascii=False)}"
+                    "\n```"
+                )
+
+        messages = [SystemMessage(self._system_prompt), UserMessage(user_msg)]
+        result = await self._llm.run(messages)
+        text = (
+            result.get_text_content()
+            if hasattr(result, "get_text_content")
+            else str(result)
+        ) or ""
+        return self._parse_response_text(
+            text,
+            fallback_citations=self._fallback_citations(retrieved_docs),
+        )
+
     async def consult(
         self, question: str, findings: dict[str, Any]
     ) -> MedicalExpertResponse:
+        if self._web_search is not None or not self._enable_web_search:
+            return await self._consult_direct(question, findings)
+
         from beeai_framework.agents.requirement import RequirementAgent
 
         user_msg = f"{question}{self._format_findings(findings)}"
         citations: list[Citation] = []
         seen_citations: set[str] = set()
+        if not self._turn_limit_active:
+            self._web_search_calls_this_turn = 0
 
         from services.medical_expert_agent.tools._adapter import expert_tools_as_beeai
 
-        tools = expert_tools_as_beeai()
+        tools = expert_tools_as_beeai(
+            {"search_medical_web": self._search_medical_web_once_per_turn}
+        )
         self._wire_tool_logging(tools, citations, seen_citations)
 
         agent = RequirementAgent(
@@ -278,3 +413,11 @@ class MedicalExpertAgent:
             reasoning=self._result_text(result),
             citations=citations,
         )
+
+
+def build_medical_expert_agent() -> StubMedicalExpert | MedicalExpertAgent:
+    """Build the configured expert, or a stub when no expert env is set."""
+
+    if not os.getenv("MEDICAL_EXPERT_PRIMARY") and not os.getenv("LLM_PROVIDER"):
+        return StubMedicalExpert()
+    return MedicalExpertAgent.from_env()
