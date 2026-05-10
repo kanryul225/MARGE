@@ -1,15 +1,15 @@
 """Tests for the orchestrator's local tool factories.
 
-Five local tools after the agent_fix refactor:
-- update_user        — non-terminal mid-flow message; records call
+Four local tools after the hybrid refactor:
 - consult_expert     — sub-agent invocation; records call
 - request_more_info  — terminal, free; records call
 - clinical_report    — terminal, gated by Requirement; records call (no in-tool gate)
 - abstain            — terminal, gated by Requirement; records call
 
-Gating is now enforced LLM-side by `MARGEProtocolRequirement` (tested in
-test_marge_requirement.py). The tool factories themselves only record
-the call into the enforcer for trajectory logging.
+Casual chat is plain natural-language `content` from the LLM (no tool
+call) — there is no longer an `update_user` or `conversational_reply`
+tool. Gating is enforced LLM-side by `MARGEProtocolRequirement` (tested
+in test_marge_requirement.py).
 """
 
 import pytest
@@ -19,23 +19,8 @@ from apps.orchestrator.tools.abstain import make_abstain
 from apps.orchestrator.tools.clinical_report import make_clinical_report
 from apps.orchestrator.tools.consult_expert import make_consult_expert
 from apps.orchestrator.tools.request_more_info import make_request_more_info
-from apps.orchestrator.tools.update_user import make_update_user
 from packages.schemas.retrieval import MedicalExpertResponse
 from services.medical_expert_agent.agent import StubMedicalExpert
-
-
-class TestUpdateUserTool:
-    def test_returns_text(self):
-        enforcer = ProtocolEnforcer()
-        upd = make_update_user(enforcer)
-        result = upd(text="Now consulting the expert…")
-        assert result == {"text": "Now consulting the expert…"}
-
-    def test_records_update_user_call(self):
-        enforcer = ProtocolEnforcer()
-        upd = make_update_user(enforcer)
-        upd(text="hi")
-        assert enforcer.has_called("update_user")
 
 
 class TestConsultExpertTool:

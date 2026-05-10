@@ -209,8 +209,13 @@ def render_request_more_info_card(payload: dict) -> None:
 
 
 def _terminal_payload_from_events(events: list[dict]) -> tuple[str | None, dict | None]:
-    """Find the last terminal tool call in this turn's events; return (name, input)."""
-    terminals = {"clinical_report", "abstain", "request_more_info", "conversational_reply"}
+    """Find the last terminal tool call in this turn's events; return (name, input).
+
+    Only structured terminals (clinical_report / abstain / request_more_info)
+    have UI cards. Casual chat lives in the streamed natural-language content
+    and produces no terminal record.
+    """
+    terminals = {"clinical_report", "abstain", "request_more_info"}
     for e in reversed(events):
         if e.get("kind") == "tool_call" and e.get("name") in terminals:
             # The structured payload may live on either tool_call or tool_output.
@@ -236,11 +241,6 @@ def render_terminal_card(events: list[dict]) -> None:
         render_abstain_card(payload)
     elif name == "request_more_info":
         render_request_more_info_card(payload)
-    elif name == "conversational_reply":
-        # Just a normal chat bubble — render the text inline.
-        text = payload.get("text") or payload.get("reply") or ""
-        if text:
-            st.markdown(text)
 
 
 def render_report(text: str) -> None:
@@ -400,6 +400,104 @@ def _get_or_create_expert():
     return st.session_state["expert"]
 
 
+_TOOL_PROGRESS_FALLBACK = {
+    "consult_medical_expert":      "🩺 Consulting the medical expert…",
+    "predict_diabetes_risk":       "📊 Running the diabetes risk model…",
+    "predict_breast_cancer_malignancy": "📊 Running the breast-tumor malignancy model…",
+    "get_patient":                 "📁 Fetching patient record…",
+    "list_patients":               "📁 Listing patients…",
+    "update_patient":              "📁 Updating patient record…",
+    "request_more_info":           "❓ Requesting additional information…",
+    "clinical_report":             "📝 Drafting the clinical report…",
+    "abstain":                     "⚠ Explaining the scope boundary…",
+}
+
+
+def _tool_progress_message(tool_name: str) -> str:
+    return _TOOL_PROGRESS_FALLBACK.get(
+        tool_name, f"🔧 **{tool_name}** _running…_"
+    )
+
+
+def _log(kind: str, payload: Any) -> None:
+    """Print a one-line trace event to stderr so /tmp/streamlit.log shows
+    real-time progress while a turn is still mid-flight (jsonl only flushes
+    after the whole turn ends)."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    snippet = json.dumps(payload, ensure_ascii=False, default=str)[:300]
+    print(f"[{ts}] [trace] {kind}: {snippet}", file=sys.stderr, flush=True)
+
+
+def render_events_timeline(events: list[dict]) -> None:
+    """Render a complete per-turn trace inside an expander.
+
+    Groups consecutive reasoning_token deltas into a single reasoning
+    block, then interleaves tool_call (with input) and tool_output (with
+    output / error) in execution order. Always available for chat
+    history messages so users can see exactly what the LLM thought and
+    what each tool returned without leaving the UI.
+    """
+    if not events:
+        return
+
+    blocks: list[tuple[str, Any]] = []
+    cur_text: list[str] = []
+    for e in events:
+        kind = e.get("kind")
+        if kind == "reasoning_token":
+            cur_text.append(e.get("text", ""))
+        elif kind in ("tool_call", "tool_output"):
+            if cur_text:
+                blocks.append(("reasoning", "".join(cur_text)))
+                cur_text = []
+            blocks.append((kind, e))
+    if cur_text:
+        blocks.append(("reasoning", "".join(cur_text)))
+
+    n_tools = sum(1 for k, _ in blocks if k == "tool_call")
+    n_errs = sum(
+        1 for k, p in blocks
+        if k == "tool_output" and isinstance(p, dict) and not p.get("success", True)
+    )
+    n_reason = sum(1 for k, _ in blocks if k == "reasoning")
+    label_parts = []
+    if n_reason: label_parts.append(f"{n_reason} reasoning step(s)")
+    if n_tools:  label_parts.append(f"{n_tools} tool call(s)")
+    if n_errs:   label_parts.append(f"{n_errs} error(s)")
+    label = "Trace · " + (", ".join(label_parts) if label_parts else "no events")
+
+    with st.expander(label, expanded=bool(n_errs)):
+        for i, (kind, payload) in enumerate(blocks):
+            if kind == "reasoning":
+                if payload.strip():
+                    st.markdown(f"**[{i:02d}] 🧠 reasoning**")
+                    st.markdown(
+                        f"<div style='border-left:3px solid #94a3b8; padding-left:.7rem; "
+                        f"color:#cbd5e1; white-space:pre-wrap; font-size:.88rem;'>"
+                        f"{payload}</div>",
+                        unsafe_allow_html=True,
+                    )
+            elif kind == "tool_call":
+                inp = payload.get("input")
+                inp_text = (
+                    json.dumps(inp, indent=2, ensure_ascii=False, default=str)
+                    if inp else "(no input)"
+                )
+                st.markdown(f"**[{i:02d}] → call** `{payload.get('name')}`")
+                st.code(inp_text, language="json")
+            elif kind == "tool_output":
+                ok = payload.get("success", True)
+                tag = "✓ ok" if ok else "✗ ERROR"
+                pl = payload.get("output") if ok else payload.get("error")
+                pl_text = (
+                    json.dumps(pl, indent=2, ensure_ascii=False, default=str)
+                    if isinstance(pl, (dict, list))
+                    else str(pl)
+                )
+                st.markdown(f"**[{i:02d}] ← return** `{payload.get('name')}` · _{tag}_")
+                st.code(pl_text, language="json" if ok else "text")
+
+
 def stream_analysis(
     user_message: str,
     patient_handle: str | None,
@@ -446,6 +544,8 @@ def stream_analysis(
         llm = build_chat_model_for_role(Role.ORCHESTRATOR)
         bundle = build_bundle(expert=expert)
 
+        _log("turn_start", {"prompt": prompt[:120]})
+
         # Hook 1: enforcer record (existing behaviour) — also queue tool name
         _orig_record = bundle.enforcer.record
         def _streaming_record(tool_name: str) -> None:
@@ -479,6 +579,8 @@ def stream_analysis(
                             name = getattr(event, "name", "")
                             if name == "start":
                                 pending["input"] = getattr(data, "input", None)
+                                _log("tool_start", {"name": tool_name,
+                                                     "input": pending["input"]})
                             elif name == "success":
                                 output = getattr(data, "output", None)
                                 output_repr: Any = None
@@ -490,6 +592,8 @@ def stream_analysis(
                                             output_repr = str(output)[:1500]
                                     else:
                                         output_repr = str(output)[:1500]
+                                _log("tool_ok", {"name": tool_name,
+                                                  "output": output_repr})
                                 eq.put((
                                     "tool_output",
                                     {"name": tool_name, "input": pending.get("input"),
@@ -498,10 +602,18 @@ def stream_analysis(
                                 pending.clear()
                             elif name == "error":
                                 err = getattr(data, "error", None)
+                                err_chain = []
+                                cur = err
+                                for _ in range(6):
+                                    if cur is None: break
+                                    err_chain.append(f"{type(cur).__name__}: {str(cur)[:200]}")
+                                    cur = getattr(cur, "__cause__", None)
+                                err_str = " ⇠ ".join(err_chain) if err_chain else repr(err)[:500]
+                                _log("tool_err", {"name": tool_name, "error": err_str})
                                 eq.put((
                                     "tool_output",
                                     {"name": tool_name, "input": pending.get("input"),
-                                     "error": repr(err)[:500], "success": False},
+                                     "error": err_str, "success": False},
                                 ))
                                 pending.clear()
 
@@ -516,8 +628,17 @@ def stream_analysis(
             state["response"] = _result_text(result)
             state["trajectory"] = list(bundle.enforcer.trajectory)
         except Exception as exc:
-            state["error"] = f"{type(exc).__name__}: {exc}"
-            state["response"] = f"Run failed: `{state['error']}`"
+            # Walk the __cause__ chain so the user sees the real underlying
+            # error (e.g., LiteLLM RateLimitError, OpenAIError 5xx, ...)
+            chain = []
+            cur: BaseException | None = exc
+            for _ in range(6):
+                if cur is None:
+                    break
+                chain.append(f"{type(cur).__name__}: {str(cur)[:200]}")
+                cur = cur.__cause__
+            state["error"] = " ⇠ ".join(chain) if chain else f"{type(exc).__name__}: {exc}"
+            state["response"] = f"Run failed:\n```\n{state['error']}\n```"
             state["trajectory"] = list(bundle.enforcer.trajectory)
         finally:
             eq.put(None)
@@ -539,6 +660,13 @@ def stream_analysis(
         return repr(obj)[:500]
 
     def _generator():
+        # Streamlit's st.write_stream consumes the first yielded chunk for
+        # type detection — empty strings are silently dropped so the actual
+        # first character of the reply still ends up being the probe target.
+        # Yield a zero-width space (real char, invisible) so detection runs
+        # on it instead of on the user-visible content.
+        yield "​"
+        streamed_text_chars = 0
         while True:
             item = eq.get(timeout=300)
             if item is None:
@@ -546,18 +674,28 @@ def stream_analysis(
             kind, payload = item
             if kind == "token":
                 events.append({"kind": "reasoning_token", "text": payload})
+                streamed_text_chars += len(payload)
                 yield payload  # typewriter effect
             elif kind == "tool_call":
                 events.append({"kind": "tool_call", **_to_jsonable(payload)})
-                yield f"\n\n🔧 `{payload['name']}`\n\n"
+                yield f"\n\n{_tool_progress_message(payload['name'])}\n\n"
             elif kind == "tool_output":
                 events.append({"kind": "tool_output", **_to_jsonable(payload)})
-                # Brief inline echo (truncated) so the user sees tool finished
-                out_str = json.dumps(payload.get("output"), ensure_ascii=False, default=str)
-                snippet = (out_str[:140] + "…") if len(out_str) > 140 else out_str
-                marker = "↳" if payload.get("success") else "⚠"
-                yield f"  {marker} `{snippet}`\n\n"
-        # Don't double-yield the final response — tokens already streamed it.
+                if payload.get("success"):
+                    out_str = json.dumps(payload.get("output"), ensure_ascii=False,
+                                         default=str)
+                    snippet = (out_str[:200] + "…") if len(out_str) > 200 else out_str
+                    yield f"  ✓ `{snippet}`\n\n"
+                else:
+                    err = payload.get("error", "(unknown)")
+                    yield f"\n\n  ❌ **{payload.get('name')} failed:** `{err}`\n\n"
+        # Fallback: BeeAI's `new_token` emitter is silent on some OpenAI-compat
+        # providers (Featherless, etc.), so token streaming may produce nothing
+        # even on a successful run. If the stream emitted no chat text, render
+        # the captured final response so the user actually sees the reply.
+        final = state.get("response") or ""
+        if streamed_text_chars == 0 and final:
+            yield final
 
     return _generator()
 
@@ -641,6 +779,7 @@ def _app_main() -> None:
             st.markdown(message["content"])
             if message.get("events"):
                 render_terminal_card(message["events"])
+                render_events_timeline(message["events"])
 
     user_input = st.chat_input("Message")
     if user_input:
@@ -653,6 +792,9 @@ def _app_main() -> None:
             st.write_stream(stream_analysis(user_input, current_patient, db_path, stream_state))
             # After the stream completes, render any structured terminal card
             render_terminal_card(stream_state.get("events", []))
+            if stream_state.get("error"):
+                st.error(f"❌ {stream_state['error']}")
+            render_events_timeline(stream_state.get("events", []))
 
         response = stream_state["response"]
         trajectory = stream_state["trajectory"]

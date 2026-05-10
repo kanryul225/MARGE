@@ -1,9 +1,10 @@
 """Tests for the BeeAI tool adapter.
 
 The adapter wraps Python callables as BeeAI Tools.
-`local_tools_as_beeai(bundle)` returns the five orchestrator-local tools
-(update_user, consult_medical_expert, request_more_info, clinical_report,
-abstain) as BeeAI Tools with the enforcer wired in.
+`local_tools_as_beeai(bundle)` returns the four orchestrator-local tools
+(consult_medical_expert, request_more_info, clinical_report, abstain) as
+BeeAI Tools with the enforcer wired in. Casual chat is natural-language
+content with no tool call (see apps/orchestrator/system_prompt.md).
 """
 
 import asyncio
@@ -39,18 +40,16 @@ class TestToBeeaiTool:
 
 class TestLocalToolsAsBeeai:
     EXPECTED = {
-        "update_user",
-        "conversational_reply",
         "consult_medical_expert",
         "request_more_info",
         "clinical_report",
         "abstain",
     }
 
-    def test_returns_six_tools(self):
+    def test_returns_four_tools(self):
         bundle = build_bundle()
         tools = local_tools_as_beeai(bundle)
-        assert len(tools) == 6
+        assert len(tools) == 4
 
     def test_tool_names_match_expected_set(self):
         bundle = build_bundle()

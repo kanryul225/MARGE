@@ -1,4 +1,9 @@
-"""Tests for the per-tool Pydantic input schemas (5 local tools)."""
+"""Tests for the per-tool Pydantic input schemas (4 local tools).
+
+Casual chat is natural-language content with no tool call (hybrid
+pattern — see apps/orchestrator/system_prompt.md), so there is no
+update_user / conversational_reply schema to verify.
+"""
 
 import pytest
 from pydantic import ValidationError
@@ -8,22 +13,7 @@ from apps.orchestrator.tools import (
     clinical_report as cr_mod,
     consult_expert as ce_mod,
     request_more_info as rmi_mod,
-    update_user as uu_mod,
 )
-
-
-class TestUpdateUserSchema:
-    def test_constants_exposed(self):
-        assert uu_mod.TOOL_NAME == "update_user"
-        assert uu_mod.TOOL_DESCRIPTION
-
-    def test_accepts_text(self):
-        obj = uu_mod.ToolInput(text="hi")
-        assert obj.text == "hi"
-
-    def test_rejects_missing_text(self):
-        with pytest.raises(ValidationError):
-            uu_mod.ToolInput()
 
 
 class TestConsultExpertSchema:

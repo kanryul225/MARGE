@@ -1,7 +1,9 @@
 """MARGE Protocol Requirement (custom BeeAI Requirement).
 
-Encodes architecture.md §2 plus the role-aware extensions agreed in the
-agent_fix slice. Single requirement, four rules:
+Hybrid pattern (post-`agent_fix` refactor): casual chat is plain
+natural-language `content` from the LLM and ends the turn with **no tool
+call**. Only structured outputs that the UI must render as cards are
+expressed as terminal tools — the surface is now four:
 
   A. predict_* tools are disallowed until consult_medical_expert was
      called successfully at least once. The expert decides which conditions
@@ -12,10 +14,11 @@ agent_fix slice. Single requirement, four rules:
      covers the "expert says nothing in our ML scope is suspected" path.
   D. request_more_info (terminal) is always allowed — the orchestrator may
      ask the user for additional data at any point.
-  E. The agent cannot terminate (prevent_stop=True on every terminal) until
-     at least one of {clinical_report, abstain, request_more_info} has been
-     called. The intermediate `update_user` tool is unrestricted and never
-     terminates the loop.
+
+There is no `prevent_stop` rule any more. A natural-language reply with
+no tool call is a perfectly valid turn ending (a chatbot saying "hi
+back"). The prompt steers the model toward picking the right structured
+terminal when one is appropriate.
 
 Order between predict_* and consult_medical_expert beyond rule A is
 intentionally unconstrained — the orchestrator can re-consult the expert
@@ -60,11 +63,9 @@ def has_consulted_expert(state: Any) -> bool:
 
 
 class MARGEProtocolRequirement(Requirement):
-    """Single Requirement encoding the four MARGE protocol rules (A–E above)."""
+    """Single Requirement encoding the four MARGE protocol rules (A–D above)."""
 
-    TERMINALS = frozenset(
-        {"clinical_report", "abstain", "request_more_info", "conversational_reply"}
-    )
+    TERMINALS = frozenset({"clinical_report", "abstain", "request_more_info"})
 
     def __init__(self) -> None:
         super().__init__()
@@ -93,7 +94,6 @@ class MARGEProtocolRequirement(Requirement):
         called = _successful_tool_names(state)
         has_expert = _EXPERT_TOOL_NAME in called
         has_ml = any(n.startswith(_ML_PREDICTION_PREFIX) for n in called)
-        has_terminal = any(n in self.TERMINALS for n in called)
 
         rules: list[Rule] = []
 
@@ -116,7 +116,7 @@ class MARGEProtocolRequirement(Requirement):
                 )
             )
 
-        # Rules B / C / D + E (terminals)
+        # Rules B / C / D (terminals — gating only, no prevent_stop)
         for tool in getattr(self, "_terminal_tools", []):
             if tool.name == "clinical_report":
                 allowed = has_ml and has_expert
@@ -138,7 +138,7 @@ class MARGEProtocolRequirement(Requirement):
                         "expert at least once."
                     )
                 )
-            else:  # request_more_info / conversational_reply — free
+            else:  # request_more_info — free
                 allowed = True
                 reason = None
 
@@ -146,9 +146,9 @@ class MARGEProtocolRequirement(Requirement):
                 Rule(
                     target=tool.name,
                     allowed=allowed,
-                    # Rule E: every terminal blocks stop until *any* terminal
-                    # has been called once.
-                    prevent_stop=not has_terminal,
+                    # Natural-language replies (no tool call) are a valid
+                    # turn ending; never block stop.
+                    prevent_stop=False,
                     hidden=False,
                     forced=False,
                     reason=reason,
